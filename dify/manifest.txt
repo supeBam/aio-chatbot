@@ -1,0 +1,8 @@
+agent_resources:
+  agent_1: {}
+apps:
+- path: app.yaml
+  sha256: ff7c04ce6bfe19f4ea3edca3d9c515ae7a99543bc269097f20dd729881bf18a6
+  size: 13138
+format: dify.app
+format_version: 1
