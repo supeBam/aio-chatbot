@@ -47,6 +47,7 @@ def apply_customer_turn_policy(nodes):
 - 只有会帮助选择当前家居宽频、流动通讯或影音串流计划的问题才属业务范围。纯闲聊、其他领域、内部信息和绕过条件用 intent=boundary、business=""、clarification=""、business_requests=[]。
 - 混合消息只路由其中真实的选购部分。即使只涉及一个业务，business_requests也须逐字摘出该部分，排除无关原话。简短回应、改口和指代先结合实际上一轮语境，不因单句没有产品名而判无关。
 - consult只用于简短回答能帮助选购的一般概念；现售计划详情和能否找到某类计划交shopping。家居宽频选购中问有没有家居电话计划，按BN查询可售宽频组合。纯感谢可用boundary，不展开或重推。
+- 家居宽频对话里，“我想要固话套餐”“想睇家居電話計劃”等新选购目标也走BN shopping，核对当前地址的宽频连家居电话组合。只有客户明说只要独立固话、不要宽频时，才按独立固话目标处理。
 """)
     edit_code(
         "prepare business_validation",
@@ -66,14 +67,15 @@ def apply_customer_turn_policy(nodes):
 - turn_intent=lookup：问某款已指明的计划详情，例如“头先嗰款包唔包日本漫游”。只写本轮question_changes，不改购买条件；不要用助手回覆当事实。
 - turn_intent=availability：问有无某类型计划。把当轮要核对的条件放到turn_conditions，每项附原话。疑问句里的新条件不默认写入长期记忆。用户在同一句明确确认了其他独立条件时仍可更新。
 - availability_scope默认为catalog：只按本轮问的范围查当前可售目录，即使话题仍是同一业务，也不套用旧预算、速度或其他已保存条件。只有明确引用原范围，例如“照頭先啲條件，有冇包埋家居電話嘅？”或“如果淨係放寬到$200，有冇？”，才用current_purchase。“頭先嗰款包唔包”是lookup；“我要加埋家居電話”是shop。
+- 已推荐之后，若用户只说“我想要某类计划”或“推荐某类计划”，且没有说明要加进原来的选择，这是查询新选项，用availability/catalog。陈述句也适用。只有表达继续原选择、要把某项加进去或修改原条件时才合并；“固话、固定电话、家居电话”视为同一服务。
 - temporarily_excluded_ids默认为[]，仅在current_purchase下排除本轮范围以外的旧条件。只点名沿用旧预算时，保留预算，排除未被引用的旧网速等条件；“其他照舊”保留未被调整的条件。例如“其他照舊，如果預算加到$200有冇？”暂时替换预算，不改保存的条件。
 - 模棱两可时，按最近相关选购语境暂查，只有不同理解会实质改变答案且不能先作有用回应时，才用clarification注明唯一需要问的区别。暂时推断不写入changes或context_update。若上轮在澄清，结合原先问题理解这次短答案。
 - purchase_switch默认为null。同一业务中明确另开选购时用{"target":"new","evidence":["用户原话"]}；重回已保存的选购时target为purchase_archive里的编号。按当前客户语句识别服务对象，单纯加一项条件不切换。新选购只新增条件；回到已保存选购时以该对象的需求编号更新。
 - 本轮问题只用question_changes中的add，处理完便不再视为当前问题。只有明示的购买条件写入changes。只问计划详情时可照样回答，即使该计划不合适。
 - 输出必须带turn_intent、availability_scope、turn_conditions、temporarily_excluded_ids、purchase_switch。临时查询范围仅用于availability；没有消息的地址事件沿用当前选购，五个字段分别为shop、catalog、[]、[]、null。
 
-例：刚推荐过每月$130内的1000M家居宽频，用户说“有冇包家居電話嘅計劃？”。查当前地址可售宽频里有没有这类计划；旧条件保留给之后的原选购。
-{"changes":[],"question_changes":[],"clarification":"","reason":"本轮只查有没有宽频连家居电话的计划","context_update":null,"turn_intent":"availability","availability_scope":"catalog","turn_conditions":[{"text":"家居宽频包含家居电话","evidence":["有冇包家居電話嘅計劃？"]}],"temporarily_excluded_ids":[],"purchase_switch":null}
+例：刚推荐过每月$130内的1000M家居宽频，用户说“我想要固话套餐”。查当前地址可售的宽频连家居电话组合；旧条件保留给之后的原选购。
+{"changes":[],"question_changes":[],"clarification":"","reason":"本轮想睇家居电话计划，未说加进之前的选择","context_update":null,"turn_intent":"availability","availability_scope":"catalog","turn_conditions":[{"text":"家居宽频包含家居电话","evidence":["我想要固话套餐"]}],"temporarily_excluded_ids":[],"purchase_switch":null}
 
 例：上轮刚展示两款上台计划；用户说“頭先嗰款包唔包日本漫遊？”。交下游定位可能指代的计划和核实，不新增购买条件。
 {"changes":[],"question_changes":[{"business":"MS","operation":"add","question_id":"","text":"用户指的上一轮计划是否包括日本漫游","evidence":["頭先嗰款包唔包日本漫遊？"]}],"clarification":"","reason":"核对上一轮计划详情","context_update":null,"turn_intent":"lookup","availability_scope":"catalog","turn_conditions":[],"temporarily_excluded_ids":[],"purchase_switch":null}

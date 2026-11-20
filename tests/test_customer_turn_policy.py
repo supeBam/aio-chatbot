@@ -79,15 +79,15 @@ class CustomerTurnPolicyTests(unittest.TestCase):
             {"id": "R2", "text": "1000M家居寬頻", "priority": "required", "attitude": "interested", "evidence": ["1000M"]},
         ]
         self.snapshot["bn_needs"].update(requirements=conditions, next_requirement_id=3)
-        message = "有冇包家居電話嘅計劃？"
+        message = "我想要固话套餐"
         bundle = self.merge(message, business="BN", turn_intent="availability",
                             turn_conditions=[{"text": "包含家居電話", "evidence": [message]}])
         needs = json.loads(self.run_node["decision_state"](bundle)["needs_json"])
         self.assertEqual([item["id"] for item in needs["requirements"]], ["T1"])
         self.assertEqual(bundle["snapshot"]["bn_needs"]["requirements"], conditions)
-        code = "AU14924HTOOTT_C3F24NOR30IDD"
+        codes = ["AU14924HTOOTT_C3F24NOR30IDD", "AD19924CM_C3F24NOR30IDD"]
         snapshot = bundle["snapshot"]
-        snapshot.update(bn_scope_codes=[code], bn_catalog_status="ready")
+        snapshot.update(bn_scope_codes=codes, bn_catalog_status="ready")
         snapshot["bn_needs"]["ready_to_recommend"] = True
         bundle["mode"] = "availability"
         plans = self.run_node["fetch_tags"]("BN", snapshot)["bundle"]["plans_tags"]
@@ -99,11 +99,11 @@ class CustomerTurnPolicyTests(unittest.TestCase):
                 "plan_code": code, "info_answers": [],
                 "requirements": [{"requirement_id": "T1", "status": "supported",
                                   "quote": "- 服务内容: 家居電話, IDD 0030", "explanation": "包括家居電話"}],
-            }]}), ranked["candidates_json"], json.dumps(needs),
+            } for code in codes]}), ranked["candidates_json"], json.dumps(needs),
         )
         reply = self.run_node["recommendation"](bundle, checked["recommendations_json"], checked["error"], "")["bundle"]
         self.assertEqual(reply["mode"], "availability")
-        self.assertEqual(reply["selected_plans"][0]["plan_monthly_fee"], "149")
+        self.assertEqual([plan["plan_monthly_fee"] for plan in reply["selected_plans"]], ["149", "199"])
 
         scoped = self.merge("其他條件照舊，有冇包家居電話？", business="BN", turn_intent="availability",
                             availability_scope="current_purchase",
