@@ -240,6 +240,7 @@ def apply_customer_turn_policy(nodes):
 - 相关问答尽量先答重点。追问每轮只问一个会改变选择的问题，不因轮数到了就推不符合的计划。
 - 用户要求的规格、必须服务和比较方向都须核实；未知或没有改善的旧计划不能作为推荐兜底。客人允许看替代时按他明确放宽的条件重新核对，其他限制继续有效。
 - 历史答问用于理解指代和避免重问，不能借历史补回已撤回条件，不从其他选购读取条件。
+- 整套计划月费及预算初筛只看「套餐参考月费」标签。「优惠月费」属于相应的单项服务，不代替或加总成整套月费。
 """)
 
     edit_code(
@@ -285,6 +286,20 @@ def apply_customer_turn_policy(nodes):
         ('后端候选必须为最多五款套餐的列表', '后端结果必须覆盖所有请求的计划'),
         ('"questions": sales_needs(needs)["questions"], "limit": 5',
          '"questions": sales_needs(needs)["questions"], "limit": len(plans_tags)'),
+        ('def mock_rank_and_details(business, plans_tags, selected_plan_codes):',
+         '''def plan_monthly_fee(markdown):
+    section = re.search(r"^###[ ]+基础信息[ ]*$\\n(.*?)(?=^#{1,6}[ ]|\\Z)", markdown, re.M | re.S)
+    if section:
+        price = re.search(r"^套餐参考月费[：:][ ]*([0-9]+(?:\\.[0-9]+)?)[ ]*$", section.group(1), re.M)
+        if price:
+            return price.group(1)
+    return None
+
+def mock_rank_and_details(business, plans_tags, selected_plan_codes):'''),
+        ('        candidates.append({**plans_by_code[code], "markdown": DETAILS[business][code]})',
+         '''        markdown = DETAILS[business][code]
+        candidates.append({**plans_by_code[code], "markdown": markdown,
+                           "plan_monthly_fee": plan_monthly_fee(markdown)})'''),
     )
     nodes["rank"]["title"] = "按本輪查詢批量取得可售計劃原文"
 
@@ -300,11 +315,13 @@ def apply_customer_turn_policy(nodes):
             lines[index] = '{"assessments":[],"reason":"没有核实到符合本轮要求的计划"}'
     item["text"] = "\n".join(lines)
     item["text"] = replace(item["text"], "仅有未改善备选时如实标记缺口，不为保留原推荐伪造支持。", "未改善的旧计划不入选。")
+    item["text"] = item["text"].replace("月费：180元", "套餐参考月费: 180")
     add_policy("select", """
 ## 核对与本轮结果
 - 选购及查有无时，候选包含当前可售范围的完整原文，按本轮条件核对；优先顺序不限制搜索，检查相关计划，不能只检查开头几项。
 - shop和availability只返回所有priority=required条件均有原文证据支持的计划。临时T编号与R编号同样需要核对。找不到就返回空assessments。preferred用来排序，不默许放宽其他条件。
 - lookup只核对用户所指计划的问题，回复是否符合购买条件不是此轮任务。不要用其他计划替换被问对象。
+- 预算上限、整套计划月费、哪款较便宜等，一律用plan_monthly_fee核对，即当前原文「基础信息」中的「套餐参考月费」。有结论时引用该字段原文；缺少整套月费则标记unknown。「优惠月费」只用于回答该产品或服务的价格，保留所属时期和条件，不作整套月费或预算依据，也不重新加总或扣减。
 """)
 
     edit_code(
@@ -335,7 +352,7 @@ def apply_customer_turn_policy(nodes):
         if mode == "lookup" and not plans:
             bundle.update(mode="lookup_unavailable", instruction="而家未能核實你問嗰款計劃。")
         elif mode in ("recommend", "availability") and not plans:
-            bundle.update(mode="no_match", instruction="我哋暫時冇符合你今次要求嘅計劃。")'''),
+            bundle.update(mode="no_match", instruction="")'''),
     )
     edit_code(
         "reply_context",
@@ -346,6 +363,17 @@ def apply_customer_turn_policy(nodes):
         current = [item for item in needs["requirements"] if item["id"] not in excluded_ids]
         needs = {"requirements": current + bundle.get("turn_requirements", [])}
     if bundle["mode"] == "error":'''),
+        ('    if bundle["mode"] == "recommend":\n        instruction += (',
+         '''    if bundle["mode"] == "recommend":
+        two_plans = len(bundle["selected_plans"]) == 2
+        heading_number = "序號. " if two_plans else ""
+        if two_plans:
+            instruction += "\\n兩款預設簡短分段。客戶要求用表格，或者至少有兩項會影響選擇嘅差異可以簡短並排比較，先考慮用表格。"
+        instruction += ('''),
+        ('"\\n逐款格式：\\n##### 1. {display_name}（{plan_code}）"',
+         '"\\n分段格式：\\n##### " + heading_number + "{display_name}（{plan_code}）"'),
+        ('"\\nBN、MS、XE统一分段展示，只有一款也必须保持版式，不能合并成大段文字。"',
+         '"\\n只用一種版式。分段時，每款計劃單獨成節。"'),
     )
     edit_code(
         "record_reply",
@@ -359,6 +387,17 @@ def apply_customer_turn_policy(nodes):
 
     item = prompt("reply")
     item["text"] = replace(
+        item["text"], "- BN、MS、XE使用统一清晰结构，只有一款也不得写成一整段。",
+        "- 推薦兩款時預設簡短分段。如果客戶要求用表格，或者有至少兩項會影響佢選擇嘅差異適合簡短並排，就可以用一個 Markdown 表格。"
+        "第一欄列比較項目，其餘兩欄按推薦順序列計劃名稱同編號，只列對客戶有用嘅已核實重點。"
+        "差異主要得一項，先用一句講清楚，再簡短列兩款。重要條件如果放入表格會難讀，就用分段。表格同分段揀一種，唔重列。",
+    )
+    item["text"] = replace(
+        item["text"], "每款以Markdown五级标题“##### 序号. display_name（plan_code）”单独成节，",
+        "分段時，每款用 Markdown 五級標題。只有一款時用「##### display_name（plan_code）」，標題前省略序號。"
+        "兩款分段時用「##### 1. display_name（plan_code）」和「##### 2. display_name（plan_code）」。每款",
+    )
+    item["text"] = replace(
         item["text"], "no_plans：说明查询成功但暂无套餐，可建议更换地址或业务；不虚构套餐。",
         "no_plans：直接說今次查詢暫時冇可選計劃，答完就停。",
     )
@@ -370,7 +409,8 @@ def apply_customer_turn_policy(nodes):
     add_policy("reply", """
 ## 像香港電訊顧問咁答
 - 每輪只講有助揀計劃嘅重點；先答客戶最想知嘅嘢，唔重播之前講過嘅內容，唔順手展開無關建議。
-- no_match：一句答「我哋暫時冇符合你今次要求嘅計劃。」可以提一個關鍵條件令答覆更自然。答完就停，唔講資料未注明，唔推舊計劃、替代或者問客戶願唔願意改條件。
+- 分段同表格只列整套「計劃參考月費」，一律用plan_monthly_fee（原文「基礎信息」嘅「套餐參考月費」）。缺少呢個值時省略金額。平時推介唔列單項產品嘅「優惠月費」，只有客戶點名問某項服務嘅價錢先簡短回答，交代適用月份同條件。必要另收費用照常列明，唔自行加總月費或再扣回贈。
+- no_match：用一句自然嘅香港粵語直接答冇。優先講客戶今輪問嘅計劃、規格或組合；如果結果受預算或者地址範圍限制，就喺同一句講清楚。按客戶嘅問法組句，唔用固定開場或固定句式。答完就停，唔講資料未注明，唔推舊計劃或替代，亦唔追問。
 - availability：直接答有冇；有可以順帶講最相關嘅計劃名和客戶問嘅特點，唔寫完整推介。沿用語境暫查時可講清楚適用範圍，例如「如果繼續睇每月$150內」。
 - lookup：只答客戶問到嘅已核實事實。如果「嗰款」有兩個合理指代，兩款答案一致就直接答；答案不同或未能一併核實，就只問客戶指邊一款。lookup_unavailable跟instruction簡短回覆，唔補推其他計劃。
 - boundary：無關問題只需一句帶返到揀電訊計劃。consult只答有助選擇嘅部分，通常一兩句足夠。

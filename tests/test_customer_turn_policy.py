@@ -148,6 +148,18 @@ class CustomerTurnPolicyTests(unittest.TestCase):
         self.assertEqual([plan["plan_code"] for plan in reply["selected_plans"]], ["MATCH"])
         self.assertEqual(reply["snapshot"]["ms_needs"]["requirements"], [])
 
+    def test_whole_plan_fee_is_read_from_basic_information(self):
+        plans = self.run_node["fetch_tags"]("XE", self.snapshot)["bundle"]["plans_tags"]
+        self.snapshot["xe_needs"]["ready_to_recommend"] = True
+        self.snapshot["xe_catalog_status"] = "ready"
+        bundle = {"snapshot": self.snapshot, "business": "XE", "mode": "lookup"}
+        shortlist = json.dumps({"selected_plan_codes": ["XEMXS1268AR"], "reason": "核對指定計劃"})
+        result = self.run_node["rank"](bundle, plans, shortlist)
+        self.assertEqual(result["error"], "")
+        plan, = json.loads(result["sales_candidates_json"])
+        self.assertIn("$78", plan["markdown"])
+        self.assertEqual(plan["plan_monthly_fee"], "68")
+
     def test_unverified_required_condition_blocks_old_plan_and_removes_history_from_reply(self):
         self.snapshot["ms_needs"].update(last_recommended_codes=["OLD"], last_reply="推薦舊計劃 OLD")
         bundle = {"snapshot": self.snapshot, "business": "MS", "mode": "availability", "instruction": "",
@@ -169,4 +181,5 @@ class CustomerTurnPolicyTests(unittest.TestCase):
                 context = self.run_node["reply_context"](reply, "有冇包日本漫遊嘅？")
                 self.assertEqual(context["selected_plans_json"], "[]")
                 self.assertNotIn("OLD", context["needs_json"])
-                self.assertEqual(reply["instruction"], "我哋暫時冇符合你今次要求嘅計劃。")
+                self.assertEqual(reply["instruction"], "")
+                self.assertIn("包含日本漫遊", context["needs_json"])
