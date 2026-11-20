@@ -109,6 +109,7 @@ class StructuredRetryContractTests(unittest.TestCase):
             ([], True),
             (["P1", "P1"], False),
             (["P1.EXTRA"], False),
+            (["P1", "P2", "P3"], False),
             (["P1", "P2", "P3", "P4"], False),
             ([None], False),
         ]

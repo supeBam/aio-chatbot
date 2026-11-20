@@ -18,6 +18,7 @@ def enum_schema(*values: str) -> dict:
 
 
 TEXT = {"type": "string"}
+RECOMMENDATION_LIMIT = 2
 BUSINESS = enum_schema("BN", "MS", "XE")
 EVIDENCE = {"type": "array", "items": TEXT, "minItems": 1}
 CHANGE_FIELDS = {
@@ -38,12 +39,18 @@ MODEL_SCHEMAS = {
     "business": object_schema({
         "business": enum_schema("", "BN", "MS", "XE"),
         "mentioned_businesses": array_schema(BUSINESS, 3),
-        "clarification": TEXT, "intent": enum_schema("consult", "shopping"),
+        "clarification": TEXT, "intent": enum_schema("consult", "shopping", "boundary"),
         "business_requests": array_schema(object_schema({
             "business": BUSINESS, "messages": EVIDENCE,
         }), 3),
     }),
     "extract": object_schema({
+        "turn_intent": enum_schema("shop", "lookup", "availability"),
+        "turn_conditions": array_schema(object_schema({"text": TEXT, "evidence": EVIDENCE}), 20),
+        "temporarily_excluded_ids": array_schema(TEXT, 100),
+        "purchase_switch": {"anyOf": [
+            {"type": "null"}, object_schema({"target": TEXT, "evidence": EVIDENCE}),
+        ]},
         "changes": array_schema(object_schema(CHANGE_FIELDS), 50),
         "question_changes": array_schema(object_schema(QUESTION_FIELDS), 50),
         "clarification": TEXT, "reason": TEXT,
@@ -68,7 +75,7 @@ MODEL_SCHEMAS = {
                 "question_id": TEXT, "status": enum_schema("answered", "unknown"),
                 "quote": TEXT, "answer": TEXT,
             }), 100),
-        }), 3),
+        }), RECOMMENDATION_LIMIT),
         "reason": TEXT,
     }),
 }
