@@ -46,6 +46,7 @@ MODEL_SCHEMAS = {
     }),
     "extract": object_schema({
         "turn_intent": enum_schema("shop", "lookup", "availability"),
+        "availability_scope": enum_schema("catalog", "current_purchase"),
         "turn_conditions": array_schema(object_schema({"text": TEXT, "evidence": EVIDENCE}), 20),
         "temporarily_excluded_ids": array_schema(TEXT, 100),
         "purchase_switch": {"anyOf": [

@@ -46,7 +46,7 @@ def apply_customer_turn_policy(nodes):
 ## 本轮选购相关性
 - 只有会帮助选择当前家居宽频、流动通讯或影音串流计划的问题才属业务范围。纯闲聊、其他领域、内部信息和绕过条件用 intent=boundary、business=""、clarification=""、business_requests=[]。
 - 混合消息只路由其中真实的选购部分。即使只涉及一个业务，business_requests也须逐字摘出该部分，排除无关原话。简短回应、改口和指代先结合实际上一轮语境，不因单句没有产品名而判无关。
-- consult只用于简短回答能帮助选购的一般概念；现售计划详情和能否找到某类计划交shopping。纯感谢可用boundary，不展开或重推。
+- consult只用于简短回答能帮助选购的一般概念；现售计划详情和能否找到某类计划交shopping。家居宽频选购中问有没有家居电话计划，按BN查询可售宽频组合。纯感谢可用boundary，不展开或重推。
 """)
     edit_code(
         "prepare business_validation",
@@ -64,18 +64,19 @@ def apply_customer_turn_policy(nodes):
 ## 今轮意图、临时查询和选购记忆
 - turn_intent=shop：用户在选计划或明确追加、修改、取消条件。确切指定的规格、明确要加入的服务及相对于上轮的调整方向是筛选条件，记录为required；“最好”等可让步偏好记为preferred。用原话支持更新，当前有效条件优先。用户允许替代时只放宽他同意放宽的维度。
 - turn_intent=lookup：问某款已指明的计划详情，例如“头先嗰款包唔包日本漫游”。只写本轮question_changes，不改购买条件；不要用助手回覆当事实。
-- turn_intent=availability：问有无某类型计划，例如“有冇包日本漫遊嘅？”。把当轮要核对的条件放到turn_conditions，每项附原话。此查询下确认过的原预算等可作范围，疑问句里的新条件不默认写入长期记忆。用户在同一句明确确认了其他独立条件时仍可更新。
-- temporarily_excluded_ids默认为[]。仅当客户问另一个明确范围时，填入今轮查询不该叠加的有效需求编号。例如原预算150、问“如果睇200蚊左右有冇？”可按新预算暂查，先不改长期预算。客户没有暗示放宽时继续沿用。
+- turn_intent=availability：问有无某类型计划。把当轮要核对的条件放到turn_conditions，每项附原话。疑问句里的新条件不默认写入长期记忆。用户在同一句明确确认了其他独立条件时仍可更新。
+- availability_scope默认为catalog：只按本轮问的范围查当前可售目录，即使话题仍是同一业务，也不套用旧预算、速度或其他已保存条件。只有明确引用原范围，例如“照頭先啲條件，有冇包埋家居電話嘅？”或“如果淨係放寬到$200，有冇？”，才用current_purchase。“頭先嗰款包唔包”是lookup；“我要加埋家居電話”是shop。
+- temporarily_excluded_ids默认为[]，仅在current_purchase下排除本轮范围以外的旧条件。只点名沿用旧预算时，保留预算，排除未被引用的旧网速等条件；“其他照舊”保留未被调整的条件。例如“其他照舊，如果預算加到$200有冇？”暂时替换预算，不改保存的条件。
 - 模棱两可时，按最近相关选购语境暂查，只有不同理解会实质改变答案且不能先作有用回应时，才用clarification注明唯一需要问的区别。暂时推断不写入changes或context_update。若上轮在澄清，结合原先问题理解这次短答案。
 - purchase_switch默认为null。同一业务中明确另开选购时用{"target":"new","evidence":["用户原话"]}；重回已保存的选购时target为purchase_archive里的编号。按当前客户语句识别服务对象，单纯加一项条件不切换。新选购只新增条件；回到已保存选购时以该对象的需求编号更新。
 - 本轮问题只用question_changes中的add，处理完便不再视为当前问题。只有明示的购买条件写入changes。只问计划详情时可照样回答，即使该计划不合适。
-- 输出必须带turn_intent、turn_conditions、temporarily_excluded_ids、purchase_switch。临时字段仅用于availability；没有消息的地址事件沿用当前选购，四个字段分别为shop、[]、[]、null。
+- 输出必须带turn_intent、availability_scope、turn_conditions、temporarily_excluded_ids、purchase_switch。临时查询范围仅用于availability；没有消息的地址事件沿用当前选购，五个字段分别为shop、catalog、[]、[]、null。
 
-例：当前在选每月$150以内的上台计划；用户说“有冇包日本漫遊嘅？”。沿用预算暂查，保留长期条件。
-{"changes":[],"question_changes":[],"clarification":"","reason":"沿用当前预算临时核对有无日本漫游","context_update":null,"turn_intent":"availability","turn_conditions":[{"text":"包含日本漫游","evidence":["有冇包日本漫遊嘅？"]}],"temporarily_excluded_ids":[],"purchase_switch":null}
+例：刚推荐过每月$130内的1000M家居宽频，用户说“有冇包家居電話嘅計劃？”。查当前地址可售宽频里有没有这类计划；旧条件保留给之后的原选购。
+{"changes":[],"question_changes":[],"clarification":"","reason":"本轮只查有没有宽频连家居电话的计划","context_update":null,"turn_intent":"availability","availability_scope":"catalog","turn_conditions":[{"text":"家居宽频包含家居电话","evidence":["有冇包家居電話嘅計劃？"]}],"temporarily_excluded_ids":[],"purchase_switch":null}
 
 例：上轮刚展示两款上台计划；用户说“頭先嗰款包唔包日本漫遊？”。交下游定位可能指代的计划和核实，不新增购买条件。
-{"changes":[],"question_changes":[{"business":"MS","operation":"add","question_id":"","text":"用户指的上一轮计划是否包括日本漫游","evidence":["頭先嗰款包唔包日本漫遊？"]}],"clarification":"","reason":"核对上一轮计划详情","context_update":null,"turn_intent":"lookup","turn_conditions":[],"temporarily_excluded_ids":[],"purchase_switch":null}
+{"changes":[],"question_changes":[{"business":"MS","operation":"add","question_id":"","text":"用户指的上一轮计划是否包括日本漫游","evidence":["頭先嗰款包唔包日本漫遊？"]}],"clarification":"","reason":"核对上一轮计划详情","context_update":null,"turn_intent":"lookup","availability_scope":"catalog","turn_conditions":[],"temporarily_excluded_ids":[],"purchase_switch":null}
 """)
     item = prompt("extract")
     lines = item["text"].splitlines()
@@ -85,7 +86,8 @@ def apply_customer_turn_policy(nodes):
         example = json.loads(line)
         if "turn_intent" in example:
             continue
-        example.update(turn_intent="shop", turn_conditions=[], temporarily_excluded_ids=[], purchase_switch=None)
+        example.update(turn_intent="shop", availability_scope="catalog", turn_conditions=[],
+                       temporarily_excluded_ids=[], purchase_switch=None)
         for change in example["changes"]:
             change.setdefault("priority", "required" if change["attitude"] == "interested" else "unspecified")
         lines[index] = json.dumps(example, ensure_ascii=False)
@@ -130,17 +132,23 @@ def apply_customer_turn_policy(nodes):
     edit_code(
         "merge extract_validation",
         ('"reason", "readiness", "context_update"}:',
-         '"reason", "readiness", "context_update", "turn_intent", "turn_conditions", "temporarily_excluded_ids", "purchase_switch"}:'),
+         '"reason", "readiness", "context_update", "turn_intent", "availability_scope", "turn_conditions", "temporarily_excluded_ids", "purchase_switch"}:'),
         ('        errors = []\n',
          '''        turn_intent = output.get("turn_intent", "shop")
         conditions = output.get("turn_conditions", [])
         excluded_ids = output.get("temporarily_excluded_ids", [])
+        availability_scope = output.get("availability_scope", "catalog")
         if turn_intent not in ("shop", "lookup", "availability"):
             raise ValueError("本轮意图无效")
         if not isinstance(conditions, list) or len(conditions) > 20 or (conditions and turn_intent != "availability"):
             raise ValueError("本轮查找条件无效")
         if not strings(excluded_ids) or (excluded_ids and (not conditions or turn_intent != "availability")):
             raise ValueError("本轮临时排除条件无效")
+        if availability_scope not in ("catalog", "current_purchase") or (
+                availability_scope == "current_purchase" and turn_intent != "availability"):
+            raise ValueError("本轮目录查询范围无效")
+        if excluded_ids and availability_scope != "current_purchase":
+            raise ValueError("只有沿用原选购时才需要逐项临时排除旧条件")
         turn_requirements = []
         for index, item in enumerate(conditions, start=1):
             if (not isinstance(item, dict) or set(item) != {"text", "evidence"}
@@ -193,7 +201,10 @@ def apply_customer_turn_policy(nodes):
          '        if turn_intent == "shop":\n            needs["interview_pending"] = False\n        if errors:'),
         ('        return {"bundle": reply_bundle(snapshot, business, "analyze", output["clarification"].strip())}',
          '''        bundle = reply_bundle(snapshot, business, "analyze", output["clarification"].strip())
-        bundle.update(turn_intent=turn_intent, turn_requirements=turn_requirements, temporarily_excluded_ids=excluded_ids)
+        if turn_intent == "availability" and availability_scope == "catalog":
+            excluded_ids = [item["id"] for item in needs["requirements"]]
+        bundle.update(turn_intent=turn_intent, availability_scope=availability_scope,
+                      turn_requirements=turn_requirements, temporarily_excluded_ids=excluded_ids)
         return {"bundle": bundle}'''),
     )
 
@@ -286,6 +297,16 @@ def apply_customer_turn_policy(nodes):
         ('后端候选必须为最多五款套餐的列表', '后端结果必须覆盖所有请求的计划'),
         ('"questions": sales_needs(needs)["questions"], "limit": 5',
          '"questions": sales_needs(needs)["questions"], "limit": len(plans_tags)'),
+        ('    request = {\n        "business": business, "plan_codes":',
+         '''    current = sales_needs(needs)
+    excluded_ids = set(bundle.get("temporarily_excluded_ids", []))
+    requirements = [] if bundle["mode"] == "lookup" else [
+        item for item in current["requirements"] if item["id"] not in excluded_ids
+    ] + bundle.get("turn_requirements", [])
+    request = {
+        "business": business, "plan_codes":'''),
+        ('"requirements": sales_needs(needs)["requirements"],\n        "questions": sales_needs(needs)["questions"]',
+         '"requirements": requirements,\n        "questions": current["questions"]'),
         ('def mock_rank_and_details(business, plans_tags, selected_plan_codes):',
          '''def plan_monthly_fee(markdown):
     section = re.search(r"^###[ ]+基础信息[ ]*$\\n(.*?)(?=^#{1,6}[ ]|\\Z)", markdown, re.M | re.S)
@@ -360,8 +381,11 @@ def mock_rank_and_details(business, plans_tags, selected_plan_codes):'''),
          '''    needs.pop("purchase_archive", None)
     if bundle["mode"] in ("availability", "no_match", "lookup_unavailable"):
         excluded_ids = set(bundle.get("temporarily_excluded_ids", []))
-        current = [item for item in needs["requirements"] if item["id"] not in excluded_ids]
+        saved = needs["requirements"]
+        current = [item for item in saved if item["id"] not in excluded_ids]
         needs = {"requirements": current + bundle.get("turn_requirements", [])}
+        if bundle["mode"] == "availability" and bundle.get("availability_scope") == "catalog":
+            needs["previous_purchase_requirements"] = saved
     if bundle["mode"] == "error":'''),
         ('    if bundle["mode"] == "recommend":\n        instruction += (',
          '''    if bundle["mode"] == "recommend":
@@ -411,7 +435,7 @@ def mock_rank_and_details(business, plans_tags, selected_plan_codes):'''),
 - 每輪只講有助揀計劃嘅重點；先答客戶最想知嘅嘢，唔重播之前講過嘅內容，唔順手展開無關建議。
 - 分段同表格只列整套「計劃參考月費」，一律用plan_monthly_fee（原文「基礎信息」嘅「套餐參考月費」）。缺少呢個值時省略金額。平時推介唔列單項產品嘅「優惠月費」，只有客戶點名問某項服務嘅價錢先簡短回答，交代適用月份同條件。必要另收費用照常列明，唔自行加總月費或再扣回贈。
 - no_match：用一句自然嘅香港粵語直接答冇。優先講客戶今輪問嘅計劃、規格或組合；如果結果受預算或者地址範圍限制，就喺同一句講清楚。按客戶嘅問法組句，唔用固定開場或固定句式。答完就停，唔講資料未注明，唔推舊計劃或替代，亦唔追問。
-- availability：直接答有冇；有可以順帶講最相關嘅計劃名和客戶問嘅特點，唔寫完整推介。沿用語境暫查時可講清楚適用範圍，例如「如果繼續睇每月$150內」。
+- availability：直接答有冇；有可以順帶講相關計劃嘅規格同整套參考月費，唔寫完整推介。previous_purchase_requirements只可以用嚟提示與上一輪嘅明顯分別，例如今輪搵到嘅計劃超出舊預算，唔可以用佢判斷今輪有冇。客戶明確要求沿用原條件時，回覆講清楚查詢範圍。
 - lookup：只答客戶問到嘅已核實事實。如果「嗰款」有兩個合理指代，兩款答案一致就直接答；答案不同或未能一併核實，就只問客戶指邊一款。lookup_unavailable跟instruction簡短回覆，唔補推其他計劃。
 - boundary：無關問題只需一句帶返到揀電訊計劃。consult只答有助選擇嘅部分，通常一兩句足夠。
 - 真正影響選擇、明確對象或核對結果先問一句。聽得明就先答，條件足夠才推介；唔為推介而硬湊計劃。

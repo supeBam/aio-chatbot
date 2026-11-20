@@ -25,17 +25,17 @@ class CustomerTurnPolicyTests(unittest.TestCase):
     def setUp(self):
         self.snapshot = copy.deepcopy(self.defaults)
 
-    def merge(self, message, **decisions):
-        self.snapshot["ms_needs"]["pending_messages"] = [message]
+    def merge(self, message, business="MS", **decisions):
+        self.snapshot[business.lower() + "_needs"]["pending_messages"] = [message]
         result = {
             "changes": [], "question_changes": [], "clarification": "", "reason": "",
             "context_update": None, "turn_intent": "shop", "turn_conditions": [], "purchase_switch": None,
             "temporarily_excluded_ids": [],
             **decisions,
         }
-        validated = self.run_node["extract_validation"](result, self.snapshot, "MS")
+        validated = self.run_node["extract_validation"](result, self.snapshot, business)
         self.assertFalse(validated["retry"], validated["error"])
-        return self.run_node["merge"](validated["text"], self.snapshot, "MS")["bundle"]
+        return self.run_node["merge"](validated["text"], self.snapshot, business)["bundle"]
 
     def test_unrelated_turn_leaves_purchase_and_routing_memory_untouched(self):
         self.snapshot["current_business"] = "MS"
@@ -58,19 +58,58 @@ class CustomerTurnPolicyTests(unittest.TestCase):
         existing = {"id": "R1", "text": "每月$150內", "priority": "required",
                     "attitude": "interested", "evidence": ["$150內"]}
         self.snapshot["ms_needs"].update(requirements=[existing], next_requirement_id=2)
-        message = "有冇包日本漫遊嘅？"
-        bundle = self.merge(message, turn_intent="availability",
-                            turn_conditions=[{"text": "包含日本漫遊", "evidence": [message]}])
+        message = "照頭先預算，有冇包日本漫遊嘅？"
+        bundle = self.merge(message, turn_intent="availability", availability_scope="current_purchase",
+                            turn_conditions=[{"text": "包含日本漫遊", "evidence": ["有冇包日本漫遊嘅？"]}])
         current = json.loads(self.run_node["decision_state"](bundle)["needs_json"])
         self.assertEqual([item["id"] for item in current["requirements"]], ["R1", "T1"])
         self.assertEqual(bundle["snapshot"]["ms_needs"]["requirements"], [existing])
         self.assertEqual(bundle["snapshot"]["ms_needs"]["questions"], [])
-        alternative = self.merge("如果睇$200內有冇？", turn_intent="availability",
+        alternative = self.merge("其他照舊，如果睇$200內有冇？", turn_intent="availability",
+                                 availability_scope="current_purchase",
                                  temporarily_excluded_ids=["R1"],
                                  turn_conditions=[{"text": "每月$200內", "evidence": ["$200內"]}])
         current = json.loads(self.run_node["decision_state"](alternative)["needs_json"])
         self.assertEqual([item["id"] for item in current["requirements"]], ["T1"])
         self.assertEqual(alternative["snapshot"]["ms_needs"]["requirements"], [existing])
+
+    def test_home_phone_availability_does_not_inherit_previous_broadband_filters(self):
+        conditions = [
+            {"id": "R1", "text": "月費$130內", "priority": "required", "attitude": "interested", "evidence": ["130內"]},
+            {"id": "R2", "text": "1000M家居寬頻", "priority": "required", "attitude": "interested", "evidence": ["1000M"]},
+        ]
+        self.snapshot["bn_needs"].update(requirements=conditions, next_requirement_id=3)
+        message = "有冇包家居電話嘅計劃？"
+        bundle = self.merge(message, business="BN", turn_intent="availability",
+                            turn_conditions=[{"text": "包含家居電話", "evidence": [message]}])
+        needs = json.loads(self.run_node["decision_state"](bundle)["needs_json"])
+        self.assertEqual([item["id"] for item in needs["requirements"]], ["T1"])
+        self.assertEqual(bundle["snapshot"]["bn_needs"]["requirements"], conditions)
+        code = "AU14924HTOOTT_C3F24NOR30IDD"
+        snapshot = bundle["snapshot"]
+        snapshot.update(bn_scope_codes=[code], bn_catalog_status="ready")
+        snapshot["bn_needs"]["ready_to_recommend"] = True
+        bundle["mode"] = "availability"
+        plans = self.run_node["fetch_tags"]("BN", snapshot)["bundle"]["plans_tags"]
+        ranked = self.run_node["rank"](bundle, plans, json.dumps({"selected_plan_codes": [], "reason": "查家居電話"}))
+        self.assertEqual(ranked["error"], "")
+        self.assertEqual([item["id"] for item in json.loads(ranked["request_json"])["requirements"]], ["T1"])
+        checked = self.run_node["validate_selection"](
+            json.dumps({"reason": "有連家居電話的計劃", "assessments": [{
+                "plan_code": code, "info_answers": [],
+                "requirements": [{"requirement_id": "T1", "status": "supported",
+                                  "quote": "- 服务内容: 家居電話, IDD 0030", "explanation": "包括家居電話"}],
+            }]}), ranked["candidates_json"], json.dumps(needs),
+        )
+        reply = self.run_node["recommendation"](bundle, checked["recommendations_json"], checked["error"], "")["bundle"]
+        self.assertEqual(reply["mode"], "availability")
+        self.assertEqual(reply["selected_plans"][0]["plan_monthly_fee"], "149")
+
+        scoped = self.merge("其他條件照舊，有冇包家居電話？", business="BN", turn_intent="availability",
+                            availability_scope="current_purchase",
+                            turn_conditions=[{"text": "包含家居電話", "evidence": ["有冇包家居電話？"]}])
+        scoped_needs = json.loads(self.run_node["decision_state"](scoped)["needs_json"])
+        self.assertEqual([item["id"] for item in scoped_needs["requirements"]], ["R1", "R2", "T1"])
 
     def test_separate_purchases_resume_with_their_own_conditions(self):
         existing = {"id": "R1", "text": "每月$150內", "priority": "required",
