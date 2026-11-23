@@ -111,6 +111,45 @@ class CustomerTurnPolicyTests(unittest.TestCase):
         scoped_needs = json.loads(self.run_node["decision_state"](scoped)["needs_json"])
         self.assertEqual([item["id"] for item in scoped_needs["requirements"]], ["R1", "R2", "T1"])
 
+    def test_disney_availability_preserves_the_plan_shown_for_the_promotion_followup(self):
+        code = "AX12924DPIQOEX"
+        self.snapshot["bn_scope_codes"] = [code]
+        self.snapshot["bn_needs"]["last_recommended_codes"] = ["OLD"]
+        text = f"有，1000M 可揀 12 個月 Disney+ 標準計劃，參考月費 $129（{code}）。"
+        displayed = json.dumps([{"plan_code": code}, {"plan_code": "AB99999"}])
+        result = self.run_node["record_reply"](self.snapshot, "BN", "availability", text, displayed, True, "")
+        self.assertEqual(result["snapshot"]["bn_needs"]["last_recommended_codes"], [code])
+        self.snapshot = result["snapshot"]
+        message = "我想加多个D+一期等级，有没有优惠？"
+        bundle = self.merge(message, business="BN", turn_intent="lookup", question_changes=[{
+            "business": "BN", "operation": "add", "question_id": "",
+            "text": "上一轮宽频连 Disney+ 组合有无优惠", "evidence": [message],
+        }])
+        snapshot = bundle["snapshot"]
+        catalog = self.run_node["fetch_tags"]("BN", snapshot)["bundle"]["plans_tags"]
+        snapshot.update(bn_plans_tags=catalog, bn_catalog_status="ready")
+        state = self.run_node["decision_state"](bundle)
+        self.assertEqual(json.loads(state["comparison_context_json"])["previous_recommendations"][0]["plan_code"], code)
+        self.assertEqual(json.loads(state["needs_json"])["requirements"], [])
+        decision = self.run_node["product_decision"](bundle, catalog, json.dumps({
+            "action": "recommend", "selected_plan_codes": [code], "follow_up": None, "reason": "查同一計劃",
+        }))
+        bundle = decision["bundle"]
+        ranked = self.run_node["rank"](bundle, catalog, decision["shortlist_json"])
+        self.assertEqual(ranked["error"], "")
+        checked = self.run_node["validate_selection"](json.dumps({
+            "reason": "原文列明預繳及回贈", "assessments": [{
+                "plan_code": code, "requirements": [], "info_answers": [{
+                    "question_id": "Q1", "status": "answered",
+                    "quote": "- 預繳HK$200，第1至第4個月每月回贈$50",
+                    "answer": "預繳$200，首4個月每月回贈$50",
+                }],
+            }],
+        }), ranked["candidates_json"], state["needs_json"])
+        result = self.run_node["recommendation"](bundle, checked["recommendations_json"], checked["error"], "")["bundle"]
+        self.assertEqual(result["mode"], "lookup")
+        self.assertEqual(result["selected_plans"][0]["plan_monthly_fee"], "129")
+
     def test_separate_purchases_resume_with_their_own_conditions(self):
         existing = {"id": "R1", "text": "每月$150內", "priority": "required",
                     "attitude": "interested", "evidence": ["$150內"]}

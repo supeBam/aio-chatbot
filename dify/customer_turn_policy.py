@@ -48,6 +48,7 @@ def apply_customer_turn_policy(nodes):
 - 混合消息只路由其中真实的选购部分。即使只涉及一个业务，business_requests也须逐字摘出该部分，排除无关原话。简短回应、改口和指代先结合实际上一轮语境，不因单句没有产品名而判无关。
 - consult只用于简短回答能帮助选购的一般概念；现售计划详情和能否找到某类计划交shopping。家居宽频选购中问有没有家居电话计划，按BN查询可售宽频组合。纯感谢可用boundary，不展开或重推。
 - 家居宽频对话里，“我想要固话套餐”“想睇家居電話計劃”等新选购目标也走BN shopping，核对当前地址的宽频连家居电话组合。只有客户明说只要独立固话、不要宽频时，才按独立固话目标处理。
+- 宽频对话里，D+、Disney、Disney+ 都指 Disney+；“一期等级”“一起登记”“加多个”等结合上下文理解为宽频组合选购。若刚查过该组合，再问登记有无优惠，仍交 BN shopping 核对原组合。
 """)
     edit_code(
         "prepare business_validation",
@@ -65,6 +66,7 @@ def apply_customer_turn_policy(nodes):
 ## 今轮意图、临时查询和选购记忆
 - turn_intent=shop：用户在选计划或明确追加、修改、取消条件。确切指定的规格、明确要加入的服务及相对于上轮的调整方向是筛选条件，记录为required；“最好”等可让步偏好记为preferred。用原话支持更新，当前有效条件优先。用户允许替代时只放宽他同意放宽的维度。
 - turn_intent=lookup：问某款已指明的计划详情，例如“头先嗰款包唔包日本漫游”。只写本轮question_changes，不改购买条件；不要用助手回覆当事实。
+- 上一轮已展示同一宽频及订阅组合，客户重述想一起登记并问优惠、费用或条款时，优先视为lookup。把优惠写入question_changes；仅问“有冇優惠”不代表必须额外减价，不新增优惠硬条件。除非客户明确更改组合或明确说没有优惠就不考虑。
 - turn_intent=availability：问有无某类型计划。把当轮要核对的条件放到turn_conditions，每项附原话。疑问句里的新条件不默认写入长期记忆。用户在同一句明确确认了其他独立条件时仍可更新。
 - availability_scope默认为catalog：只按本轮问的范围查当前可售目录，即使话题仍是同一业务，也不套用旧预算、速度或其他已保存条件。只有明确引用原范围，例如“照頭先啲條件，有冇包埋家居電話嘅？”或“如果淨係放寬到$200，有冇？”，才用current_purchase。“頭先嗰款包唔包”是lookup；“我要加埋家居電話”是shop。
 - 已推荐之后，若用户只说“我想要某类计划”或“推荐某类计划”，且没有说明要加进原来的选择，这是查询新选项，用availability/catalog。陈述句也适用。只有表达继续原选择、要把某项加进去或修改原条件时才合并；“固话、固定电话、家居电话”视为同一服务。
@@ -79,6 +81,9 @@ def apply_customer_turn_policy(nodes):
 
 例：上轮刚展示两款上台计划；用户说“頭先嗰款包唔包日本漫遊？”。交下游定位可能指代的计划和核实，不新增购买条件。
 {"changes":[],"question_changes":[{"business":"MS","operation":"add","question_id":"","text":"用户指的上一轮计划是否包括日本漫游","evidence":["頭先嗰款包唔包日本漫遊？"]}],"clarification":"","reason":"核对上一轮计划详情","context_update":null,"turn_intent":"lookup","availability_scope":"catalog","turn_conditions":[],"temporarily_excluded_ids":[],"purchase_switch":null}
+
+例：上一轮已展示可选 Disney+ 的宽频，用户说“我想加多个D+一期等级，有没有优惠？”。只核对刚展示组合的优惠。
+{"changes":[],"question_changes":[{"business":"BN","operation":"add","question_id":"","text":"上一轮宽频连 Disney+ 组合同步登记有无优惠","evidence":["我想加多个D+一期等级，有没有优惠？"]}],"clarification":"","reason":"沿用刚展示的组合核对优惠","context_update":null,"turn_intent":"lookup","availability_scope":"catalog","turn_conditions":[],"temporarily_excluded_ids":[],"purchase_switch":null}
 """)
     item = prompt("extract")
     lines = item["text"].splitlines()
@@ -344,6 +349,7 @@ def mock_rank_and_details(business, plans_tags, selected_plan_codes):'''),
 - 选购及查有无时，候选包含当前可售范围的完整原文，按本轮条件核对；优先顺序不限制搜索，检查相关计划，不能只检查开头几项。
 - shop和availability只返回所有priority=required条件均有原文证据支持的计划。临时T编号与R编号同样需要核对。找不到就返回空assessments。preferred用来排序，不默许放宽其他条件。
 - lookup只核对用户所指计划的问题，回复是否符合购买条件不是此轮任务。不要用其他计划替换被问对象。
+- 用户想要 Disney+ 时，原文明确可选 Disney+ 的二选一组合可以满足选择该服务的需求。说明需要选 Disney+、适用档位和期数；若用户明确要求两项同时包含，按原文核对。核对优惠时，组合已包含或可选的权益与额外减价分别判断。
 - 预算上限、整套计划月费、哪款较便宜等，一律用plan_monthly_fee核对，即当前原文「基础信息」中的「套餐参考月费」。有结论时引用该字段原文；缺少整套月费则标记unknown。「优惠月费」只用于回答该产品或服务的价格，保留所属时期和条件，不作整套月费或预算依据，也不重新加总或扣减。
 """)
 
@@ -406,6 +412,13 @@ def mock_rank_and_details(business, plans_tags, selected_plan_codes):'''),
         ('    if persist_reply and business:', '    if persist_reply and business and mode != "boundary":'),
         ('        needs["last_reply"] = text',
          '''        needs.update(questions=[], next_question_id=1)
+        if mode == "availability":
+            shown_codes = [
+                plan["plan_code"] for plan in json.loads(selected_plans_json)
+                if re.search(r"(?<![A-Za-z0-9_-])" + re.escape(plan["plan_code"]) + r"(?![A-Za-z0-9_-])", text)
+            ]
+            if shown_codes:
+                needs["last_recommended_codes"] = shown_codes
         if needs["interview_pending"] and mode in ("lookup", "lookup_unavailable", "availability", "no_match"):
             return {"snapshot": snapshot}
         needs["last_reply"] = text'''),
@@ -437,7 +450,8 @@ def mock_rank_and_details(business, plans_tags, selected_plan_codes):'''),
 - 每輪只講有助揀計劃嘅重點；先答客戶最想知嘅嘢，唔重播之前講過嘅內容，唔順手展開無關建議。
 - 分段同表格只列整套「計劃參考月費」，一律用plan_monthly_fee（原文「基礎信息」嘅「套餐參考月費」）。缺少呢個值時省略金額。平時推介唔列單項產品嘅「優惠月費」，只有客戶點名問某項服務嘅價錢先簡短回答，交代適用月份同條件。必要另收費用照常列明，唔自行加總月費或再扣回贈。
 - no_match：用一句自然嘅香港粵語直接答冇。優先講客戶今輪問嘅計劃、規格或組合；如果結果受預算或者地址範圍限制，就喺同一句講清楚。按客戶嘅問法組句，唔用固定開場或固定句式。答完就停，唔講資料未注明，唔推舊計劃或替代，亦唔追問。
-- availability：直接答有冇；有可以順帶講相關計劃嘅規格同整套參考月費，唔寫完整推介。previous_purchase_requirements只可以用嚟提示與上一輪嘅明顯分別，例如今輪搵到嘅計劃超出舊預算，唔可以用佢判斷今輪有冇。客戶明確要求沿用原條件時，回覆講清楚查詢範圍。
+- availability：直接答有冇；有可以順帶講相關計劃嘅規格同整套參考月費，唔寫完整推介。提到某款時附上原有計劃編號，方便下一輪接住查。previous_purchase_requirements只可以用嚟提示與上一輪嘅明顯分別，例如今輪搵到嘅計劃超出舊預算，唔可以用佢判斷今輪有冇。客戶明確要求沿用原條件時，回覆講清楚查詢範圍。
+- 問登記優惠時，先交代已核實可揀嘅服務同整套參考月費。額外優惠未能核實，就只講未能確認有額外優惠，唔反過來否定已核實嘅計劃或權益。二選一要講清楚係可選其中一項。
 - lookup：只答客戶問到嘅已核實事實。如果「嗰款」有兩個合理指代，兩款答案一致就直接答；答案不同或未能一併核實，就只問客戶指邊一款。lookup_unavailable跟instruction簡短回覆，唔補推其他計劃。
 - boundary：無關問題只需一句帶返到揀電訊計劃。consult只答有助選擇嘅部分，通常一兩句足夠。
 - 真正影響選擇、明確對象或核對結果先問一句。聽得明就先答，條件足夠才推介；唔為推介而硬湊計劃。
