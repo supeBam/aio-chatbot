@@ -78,6 +78,69 @@ LABEL_VALIDATION_CODE = r'''def checked_link_label(label, markdown):
 '''
 
 
+def configure_catalog_recommendation_links(nodes):
+    extract = nodes["extract"]["data"]
+    extract["structured_output"]["schema"] = copy.deepcopy(MODEL_SCHEMAS["extract"])
+    prompt = extract["prompt_template"][0]
+    prompt["text"] = replace(
+        prompt["text"], "## 本轮办理链接请求",
+        "## 本轮目录推荐\n"
+        "- turn_intent 為 availability 時，如果客戶今輪明確要求推介或揀出某類可售計劃，"
+        "catalog_recommendation 填最近一條客戶消息中表達推薦要求嘅逐字原話，"
+        "例如「推介包日本漫遊嘅計劃」。沿用今輪查詢範圍，唔改舊購買條件。\n"
+        "- 只問有冇某類計劃、查單款詳情、其他意圖或地址事件，catalog_recommendation 填空字串。\n\n"
+        "## 本轮办理链接请求",
+    )
+    lines = prompt["text"].splitlines(keepends=True)
+    for index, line in enumerate(lines):
+        if line.startswith('{"changes"'):
+            try:
+                example = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            example["catalog_recommendation"] = ""
+            lines[index] = json.dumps(example, ensure_ascii=False) + ("\n" if line.endswith("\n") else "")
+    prompt["text"] = "".join(lines)
+
+    for node_id in ("extract_validation", "merge"):
+        data = nodes[node_id]["data"]
+        code = replace(data["code"], '"purchase_switch", "link_request"}',
+                       '"purchase_switch", "link_request", "catalog_recommendation"}')
+        code = replace(code, '        turn_intent = output.get("turn_intent", "shop")', '''        turn_intent = output.get("turn_intent", "shop")
+        catalog_recommendation = output.get("catalog_recommendation", "")
+        if not isinstance(catalog_recommendation, str):
+            raise ValueError("目录推荐请求必须为原话或空文本")
+        if (turn_intent != "availability" or not catalog_recommendation.strip()
+                or not pending or catalog_recommendation not in pending[-1]):
+            catalog_recommendation = ""''')
+        data["code"] = replace(code, "link_request=link_request)",
+                               "link_request=link_request, catalog_recommendation=catalog_recommendation)")
+
+    context = nodes["reply_context"]["data"]
+    code = replace(context["code"], "def build_link_products(mode, link_requested, plans):\n"
+                   '    if mode != "recommend" and not (mode == "lookup" and link_requested and len(plans) == 1):',
+                   '''def build_link_products(mode, link_requested, catalog_requested, plans):
+    if not (mode == "recommend" or (mode == "availability" and catalog_requested)
+            or (mode == "lookup" and link_requested and len(plans) == 1)):''')
+    code = replace(code, '    link_requested = bool(link_request and link_request in message)',
+                   '''    link_requested = bool(link_request and link_request in message)
+    catalog_request = bundle.get("catalog_recommendation", "")
+    catalog_requested = bool(catalog_request and catalog_request in message)''')
+    context["code"] = replace(code, 'build_link_products(bundle["mode"], link_requested, bundle["selected_plans"])',
+                              'build_link_products(bundle["mode"], link_requested, catalog_requested, bundle["selected_plans"])')
+
+
+def configure_catalog_recommendation_history(record):
+    code = replace(record["code"], "persist_reply, interview_topic):",
+                   "persist_reply, interview_topic, products=None):")
+    record["code"] = replace(
+        code, '        if mode == "availability":\n            shown_codes = [',
+        '        if mode == "availability":\n'
+        '            shown_codes = [product["plan_code"] for product in (products or [])] or [',
+    )
+    record["variables"].append(copy.deepcopy(LINK_PRODUCTS_INPUT))
+
+
 def apply_product_link_policy(graph):
     nodes = {node["id"]: node for node in graph["nodes"]}
     if "product_link_action" in nodes:
@@ -171,6 +234,7 @@ def apply_product_link_policy(graph):
             instruction += "\\n有多個可能指代，只問客戶想要邊款計劃嘅辦理連結。"
     if bundle["mode"] == "recommend":''')
     configure_link_products(nodes["reply_context"]["data"])
+    configure_catalog_recommendation_links(nodes)
     add_prompt("reply", """
 ## 回复末尾的套餐入口
 - 推薦時，如果需要一句收尾，就用客戶今輪最在意嘅條件點出選擇重點。避免固定引導句、重複列套餐或承諾一定可以辦理。
@@ -179,6 +243,7 @@ def apply_product_link_policy(graph):
 
     node_id = "product_link_action"
     record = nodes["record_reply"]
+    configure_catalog_recommendation_history(record["data"])
     position = {"x": record["position"]["x"], "y": record["position"]["y"] + 160}
     graph["nodes"].append({
         "data": {

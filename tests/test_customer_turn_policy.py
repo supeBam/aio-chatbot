@@ -226,6 +226,78 @@ class CustomerTurnPolicyTests(unittest.TestCase):
         self.assertEqual([plan["plan_code"] for plan in reply["selected_plans"]], ["MATCH"])
         self.assertEqual(reply["snapshot"]["ms_needs"]["requirements"], [])
 
+    def test_explicit_catalog_recommendation_gets_links_without_changing_saved_conditions(self):
+        for message, evidence, expected_action in (
+            ("推介包日本漫遊嘅計劃", "推介包日本漫遊嘅計劃", "SHOW_PRODUCT_LINK"),
+            ("有冇包日本漫遊嘅？", "", "NONE"),
+            ("有冇包日本漫遊嘅？", "推介包日本漫遊嘅計劃", "NONE"),
+        ):
+            with self.subTest(message=message, evidence=evidence):
+                bundle = self.merge(
+                    message, turn_intent="availability", catalog_recommendation=evidence,
+                    turn_conditions=[{"text": "包含日本漫遊", "evidence": [message]}],
+                )
+                plans = self.run_node["fetch_tags"]("MS", self.snapshot)["bundle"]["plans_tags"]
+                bundle["snapshot"]["ms_catalog_status"] = "ready"
+                code = plans[0]["plan_code"]
+                decision = self.run_node["product_decision"](bundle, plans, json.dumps({
+                    "action": "recommend", "selected_plan_codes": [code], "follow_up": None, "reason": "核對目錄",
+                }))
+                self.assertEqual(decision["bundle"]["mode"], "availability")
+                checked = self.run_node["validate_selection"](
+                    json.dumps({"reason": "有符合條件", "assessments": [{
+                        "plan_code": code, "info_answers": [], "requirements": [{
+                            "requirement_id": "T1", "status": "supported",
+                            "quote": "包括日本漫遊", "explanation": "符合",
+                        }],
+                    }]}),
+                    json.dumps([{"plan_code": code, "markdown": "包括日本漫遊"}]),
+                    self.run_node["decision_state"](bundle)["needs_json"],
+                )
+                self.assertEqual(checked["error"], "")
+                reply = self.run_node["recommendation"](
+                    decision["bundle"], checked["recommendations_json"], "", "",
+                )["bundle"]
+                self.assertEqual(reply["snapshot"]["ms_needs"]["requirements"], [])
+                context = self.run_node["reply_context"](reply, message)
+                self.assertEqual(json.loads(context["selected_plans_json"])[0]["plan_code"], code)
+                action = self.product_link(context)
+                self.assertEqual(action["frontend_action"], expected_action)
+                self.assertEqual(action["products"], (
+                    [{"plan_code": code, "link_label": "查看計劃"}] if expected_action == "SHOW_PRODUCT_LINK" else []
+                ))
+                saved = self.record_reply(context, "呢款包日本漫遊。")
+                self.assertEqual(saved["ms_needs"]["last_recommended_codes"],
+                                 [code] if expected_action == "SHOW_PRODUCT_LINK" else [])
+
+    def record_reply(self, context, text):
+        outputs = {"reply_context": context, "reply": {"text": text}}
+        inputs = {}
+        for item in self.nodes["record_reply"]["variables"]:
+            node, field = item["value_selector"]
+            inputs[item["variable"]] = outputs[node][field]
+        return self.run_node["record_reply"](**inputs)["snapshot"]
+
+    def test_catalog_recommendation_caches_both_codes_in_link_order_for_follow_up(self):
+        plans = self.run_node["fetch_tags"]("MS", self.snapshot)["bundle"]["plans_tags"]
+        self.snapshot["ms_plans_tags"] = plans
+        self.snapshot["ms_needs"]["interview_pending"] = True
+        codes = [plans[1]["plan_code"], plans[0]["plan_code"]]
+        message = "推介包日本漫遊嘅計劃"
+        bundle = {
+            "snapshot": self.snapshot, "business": "MS", "mode": "availability", "instruction": "",
+            "persist_reply": True, "interview_topic": "", "catalog_recommendation": message,
+            "selected_plans": [{"plan_code": code, "markdown": "包括日本漫遊"} for code in codes],
+        }
+        context = self.run_node["reply_context"](bundle, message)
+        saved = self.record_reply(context, f"兩款都包日本漫遊，{codes[0]} 數據較多。")
+        self.assertEqual(saved["ms_needs"]["last_recommended_codes"], codes)
+        self.assertTrue(saved["ms_needs"]["interview_pending"])
+
+        next_turn = self.run_node["decision_state"]({**bundle, "snapshot": saved, "mode": "lookup"})
+        comparison = json.loads(next_turn["comparison_context_json"])
+        self.assertEqual([plan["plan_code"] for plan in comparison["previous_recommendations"]], codes)
+
     def product_link(self, context):
         variables = self.nodes["product_link_action"]["variables"]
         self.assertEqual([(item["variable"], item["value_selector"]) for item in variables], [

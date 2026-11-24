@@ -94,8 +94,8 @@
 |---|---|---|
 | 准备流式回复上下文，不包装聊天JSON | `reply_context` | 整理回复模式、用户原话、需求、目录和精选结果；准备供最终 LLM 使用的上下文，不把回复包装成聊天 JSON。 |
 | 先输出前端弹表单动作 | `address_action` | 输出前端动作 `request_address`，由前端触发表单流程；不是聊天文本，也不应改成在聊天中索取完整地址。 |
-| 输出套餐办理链接动作 | `product_link_action` | `answer` 后接收 `reply_context` 提供的办理链接列表和业务代码，输出 `frontend_action`、`service_type` 和 `products`。列表每项包含 `plan_code` 和 `link_label`，由 `reply_context` 根据本轮推荐或明确索取的唯一可售套餐生成。 |
-| 完整回复后记录本业务上下文 | `record_reply` | 在最终回复后写回实际回复和访谈状态；供下一轮业务路由、需求理解及追问延续使用。 |
+| 输出套餐办理链接动作 | `product_link_action` | `answer` 后接收 `reply_context` 提供的办理链接列表和业务代码，输出 `frontend_action`、`service_type` 和 `products`。列表每项包含 `plan_code` 和 `link_label`。本轮推荐、明确要求从当前可售目录选出套餐，或明确索取唯一可定位套餐的办理链接时，`reply_context` 为通过校验的套餐生成入口。普通可售查询可以列出套餐详情，办理入口为空。 |
+| 完整回复后记录本业务上下文 | `record_reply` | 在最终回复后保存会话上下文。明确要求目录推荐时，按办理入口顺序保存 `last_recommended_codes`，供下一轮定位「第 2 款」等指代。 |
 
 前端从当前运行中成功完成的 `product_link_action` 节点读取 `data.outputs`。`frontend_action` 为 `SHOW_PRODUCT_LINK` 时，按 `products` 的顺序在流式正文结束后展示入口。每项的 `link_label` 用于显示，顶层 `service_type` 取本轮业务代码。前端结合 `service_type` 和 `plan_code` 按现有规则生成跳转地址，宽频 `BN` 需要带 `qid`，`MS` 和 `XE` 直接按对应服务生成地址。无法生成有效地址的单项可以省略。无入口时动作是 `NONE`，`products` 为空数组。接入时需确认 SSE 通道会透传该节点的动态输出。
 
