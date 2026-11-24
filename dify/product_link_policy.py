@@ -11,19 +11,11 @@ else:
     from model_output_schemas import MODEL_SCHEMAS, RECOMMENDATION_LIMIT
 
 
-PRODUCT_LINK_CODE = r'''import json
-import re
+LINK_PRODUCTS_CODE = r'''def build_link_products(mode, link_requested, plans):
+    if mode != "recommend" and not (mode == "lookup" and link_requested and len(plans) == 1):
+        return []
 
-
-def main(mode, link_requested, selected_plans_json):
-    result = {"frontend_action": "NONE", "products": []}
-    if mode != "recommend" and not (mode == "lookup" and link_requested):
-        return result
-    plans = json.loads(selected_plans_json)
-    if mode == "lookup" and len(plans) != 1:
-        return result
-
-    products = result["products"]
+    products = []
     seen = set()
     for plan in plans:
         code = plan.get("plan_code")
@@ -37,10 +29,37 @@ def main(mode, link_requested, selected_plans_json):
     for index, product in enumerate(products):
         if not labels[index] or labels.count(labels[index]) > 1:
             product["link_label"] = "查看計劃" if len(products) == 1 else f"查看第 {index + 1} 款"
-    if products:
-        result["frontend_action"] = "SHOW_PRODUCT_LINK"
-    return result
+    return products
 '''
+
+
+PRODUCT_LINK_CODE = '''def main(products):
+    return {
+        "frontend_action": "SHOW_PRODUCT_LINK" if products else "NONE",
+        "products": products,
+    }
+'''
+
+
+def configure_link_products(context):
+    context["code"] = replace(
+        context["code"], "def main(bundle, message):",
+        LINK_PRODUCTS_CODE.replace("__RECOMMENDATION_LIMIT__", str(RECOMMENDATION_LIMIT))
+        + "\n\ndef main(bundle, message):",
+    )
+    context["code"] = replace(
+        context["code"], '        "persist_reply": bundle["persist_reply"],',
+        '        "link_products": build_link_products(bundle["mode"], link_requested, bundle["selected_plans"]),\n'
+        '        "persist_reply": bundle["persist_reply"],',
+    )
+    context["outputs"]["link_products"] = {"children": None, "type": "array[object]"}
+
+
+LINK_PRODUCTS_INPUT = {
+    "value_selector": ["reply_context", "link_products"],
+    "value_type": "array[object]",
+    "variable": "products",
+}
 
 
 LABEL_VALIDATION_CODE = r'''def checked_link_label(label, markdown):
@@ -150,9 +169,7 @@ def apply_product_link_policy(graph):
         else:
             instruction += "\\n有多個可能指代，只問客戶想要邊款計劃嘅辦理連結。"
     if bundle["mode"] == "recommend":''')
-    edit_code("reply_context", '        "persist_reply": bundle["persist_reply"],',
-              '        "link_requested": link_requested,\n        "persist_reply": bundle["persist_reply"],')
-    nodes["reply_context"]["data"]["outputs"]["link_requested"] = {"children": None, "type": "boolean"}
+    configure_link_products(nodes["reply_context"]["data"])
     add_prompt("reply", """
 ## 回复末尾的套餐入口
 - 推薦時，如果需要一句收尾，就用客戶今輪最在意嘅條件點出選擇重點。避免固定引導句、重複列套餐或承諾一定可以辦理。
@@ -162,20 +179,16 @@ def apply_product_link_policy(graph):
     node_id = "product_link_action"
     record = nodes["record_reply"]
     position = {"x": record["position"]["x"], "y": record["position"]["y"] + 160}
-    fields = {"mode": "string", "link_requested": "boolean", "selected_plans_json": "string"}
     graph["nodes"].append({
         "data": {
-            "code": PRODUCT_LINK_CODE.replace("__RECOMMENDATION_LIMIT__", str(RECOMMENDATION_LIMIT)),
+            "code": PRODUCT_LINK_CODE,
             "code_language": "python3",
             "outputs": {
                 "frontend_action": {"children": None, "type": "string"},
                 "products": {"children": None, "type": "array[object]"},
             },
             "selected": False, "title": "输出套餐办理链接动作", "type": "code",
-            "variables": [
-                {"value_selector": ["reply_context", name], "value_type": kind, "variable": name}
-                for name, kind in fields.items()
-            ],
+            "variables": [copy.deepcopy(LINK_PRODUCTS_INPUT)],
         },
         "height": 52, "id": node_id, "position": position, "positionAbsolute": dict(position),
         "selected": False, "sourcePosition": "right", "targetPosition": "left",

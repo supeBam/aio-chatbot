@@ -10936,17 +10936,29 @@ workflow:
           \ interview_topic=\"\"):\n    return {\n        \"snapshot\": snapshot,\
           \ \"business\": business, \"mode\": mode,\n        \"instruction\": instruction,\
           \ \"selected_plans\": selected_plans or [],\n        \"persist_reply\":\
-          \ persist_reply, \"interview_topic\": interview_topic\n    }\n\ndef main(bundle,\
-          \ message):\n    snapshot = bundle[\"snapshot\"]\n    business = bundle[\"\
-          business\"]\n    needs = sales_needs(snapshot[business.lower() + \"_needs\"\
-          ]) if business else clone(NEEDS_DEFAULT)\n    needs.pop(\"purchase_archive\"\
-          , None)\n    if bundle[\"mode\"] in (\"availability\", \"no_match\", \"\
-          lookup_unavailable\"):\n        excluded_ids = set(bundle.get(\"temporarily_excluded_ids\"\
-          , []))\n        saved = needs[\"requirements\"]\n        current = [item\
-          \ for item in saved if item[\"id\"] not in excluded_ids]\n        needs\
-          \ = {\"requirements\": current + bundle.get(\"turn_requirements\", [])}\n\
-          \        if bundle[\"mode\"] == \"availability\" and bundle.get(\"availability_scope\"\
-          ) == \"catalog\":\n            needs[\"previous_purchase_requirements\"\
+          \ persist_reply, \"interview_topic\": interview_topic\n    }\n\ndef build_link_products(mode,\
+          \ link_requested, plans):\n    if mode != \"recommend\" and not (mode ==\
+          \ \"lookup\" and link_requested and len(plans) == 1):\n        return []\n\
+          \n    products = []\n    seen = set()\n    for plan in plans:\n        code\
+          \ = plan.get(\"plan_code\")\n        if not isinstance(code, str) or not\
+          \ re.fullmatch(r\"[A-Za-z0-9][A-Za-z0-9_-]*\", code) or code in seen:\n\
+          \            continue\n        seen.add(code)\n        products.append({\"\
+          plan_code\": code, \"link_label\": plan.get(\"link_label\") or \"\"})\n\
+          \        if len(products) == 2:\n            break\n    labels = [re.sub(r\"\
+          \\s+\", \"\", product[\"link_label\"]).casefold() for product in products]\n\
+          \    for index, product in enumerate(products):\n        if not labels[index]\
+          \ or labels.count(labels[index]) > 1:\n            product[\"link_label\"\
+          ] = \"查看計劃\" if len(products) == 1 else f\"查看第 {index + 1} 款\"\n    return\
+          \ products\n\n\ndef main(bundle, message):\n    snapshot = bundle[\"snapshot\"\
+          ]\n    business = bundle[\"business\"]\n    needs = sales_needs(snapshot[business.lower()\
+          \ + \"_needs\"]) if business else clone(NEEDS_DEFAULT)\n    needs.pop(\"\
+          purchase_archive\", None)\n    if bundle[\"mode\"] in (\"availability\"\
+          , \"no_match\", \"lookup_unavailable\"):\n        excluded_ids = set(bundle.get(\"\
+          temporarily_excluded_ids\", []))\n        saved = needs[\"requirements\"\
+          ]\n        current = [item for item in saved if item[\"id\"] not in excluded_ids]\n\
+          \        needs = {\"requirements\": current + bundle.get(\"turn_requirements\"\
+          , [])}\n        if bundle[\"mode\"] == \"availability\" and bundle.get(\"\
+          availability_scope\") == \"catalog\":\n            needs[\"previous_purchase_requirements\"\
           ] = saved\n    if bundle[\"mode\"] == \"error\":\n        needs[\"last_reply\"\
           ] = \"\"\n        needs[\"last_recommended_codes\"] = []\n    instruction\
           \ = sales_user_text(bundle[\"instruction\"]) if operator_reference(bundle[\"\
@@ -10968,9 +10980,10 @@ workflow:
           : business, \"mode\": bundle[\"mode\"],\n        \"instruction\": instruction,\
           \ \"needs_json\": dump(needs),\n        \"selected_plans_json\": dump(sales_plans(bundle[\"\
           selected_plans\"])),\n        \"user_message\": sales_user_text(message),\n\
-          \        \"link_requested\": link_requested,\n        \"persist_reply\"\
-          : bundle[\"persist_reply\"],\n        \"interview_topic\": bundle[\"interview_topic\"\
-          ],\n        \"plans_tags_json\": \"[]\"\n    }\n"
+          \        \"link_products\": build_link_products(bundle[\"mode\"], link_requested,\
+          \ bundle[\"selected_plans\"]),\n        \"persist_reply\": bundle[\"persist_reply\"\
+          ],\n        \"interview_topic\": bundle[\"interview_topic\"],\n        \"\
+          plans_tags_json\": \"[]\"\n    }\n"
         code_language: python3
         outputs:
           business:
@@ -11039,9 +11052,9 @@ workflow:
           user_message:
             children: null
             type: string
-          link_requested:
+          link_products:
             children: null
-            type: boolean
+            type: array[object]
         selected: false
         title: 准备流式回复上下文，不包装聊天JSON
         type: code
@@ -12150,35 +12163,11 @@ workflow:
       zIndex: 1001
     - data:
         code: |
-          import json
-          import re
-
-
-          def main(mode, link_requested, selected_plans_json):
-              result = {"frontend_action": "NONE", "products": []}
-              if mode != "recommend" and not (mode == "lookup" and link_requested):
-                  return result
-              plans = json.loads(selected_plans_json)
-              if mode == "lookup" and len(plans) != 1:
-                  return result
-
-              products = result["products"]
-              seen = set()
-              for plan in plans:
-                  code = plan.get("plan_code")
-                  if not isinstance(code, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", code) or code in seen:
-                      continue
-                  seen.add(code)
-                  products.append({"plan_code": code, "link_label": plan.get("link_label") or ""})
-                  if len(products) == 2:
-                      break
-              labels = [re.sub(r"\s+", "", product["link_label"]).casefold() for product in products]
-              for index, product in enumerate(products):
-                  if not labels[index] or labels.count(labels[index]) > 1:
-                      product["link_label"] = "查看計劃" if len(products) == 1 else f"查看第 {index + 1} 款"
-              if products:
-                  result["frontend_action"] = "SHOW_PRODUCT_LINK"
-              return result
+          def main(products):
+              return {
+                  "frontend_action": "SHOW_PRODUCT_LINK" if products else "NONE",
+                  "products": products,
+              }
         code_language: python3
         outputs:
           frontend_action:
@@ -12193,19 +12182,9 @@ workflow:
         variables:
         - value_selector:
           - reply_context
-          - mode
-          value_type: string
-          variable: mode
-        - value_selector:
-          - reply_context
-          - link_requested
-          value_type: boolean
-          variable: link_requested
-        - value_selector:
-          - reply_context
-          - selected_plans_json
-          value_type: string
-          variable: selected_plans_json
+          - link_products
+          value_type: array[object]
+          variable: products
       height: 52
       id: product_link_action
       position:

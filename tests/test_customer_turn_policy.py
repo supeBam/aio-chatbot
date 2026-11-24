@@ -227,9 +227,11 @@ class CustomerTurnPolicyTests(unittest.TestCase):
         self.assertEqual(reply["snapshot"]["ms_needs"]["requirements"], [])
 
     def product_link(self, context):
-        return self.run_node["product_link_action"](
-            context["mode"], context["link_requested"], context["selected_plans_json"],
-        )
+        variables = self.nodes["product_link_action"]["variables"]
+        self.assertEqual([(item["variable"], item["value_selector"]) for item in variables], [
+            ("products", ["reply_context", "link_products"]),
+        ])
+        return self.run_node["product_link_action"](context["link_products"])
 
     def test_recommendation_keeps_both_links_when_model_omits_a_label(self):
         candidates = [
@@ -248,12 +250,12 @@ class CustomerTurnPolicyTests(unittest.TestCase):
                   "instruction": "", "persist_reply": True, "interview_topic": ""}
         reply = self.run_node["recommendation"](bundle, checked["recommendations_json"], "", "")["bundle"]
         context = self.run_node["reply_context"](reply, "推介兩款寬頻")
-        self.assertEqual(self.product_link(context), {
-            "frontend_action": "SHOW_PRODUCT_LINK", "products": [
-                {"plan_code": "PLAN_A", "link_label": "查看 1000M 方案"},
-                {"plan_code": "PLAN_B", "link_label": "查看第 2 款"},
-            ],
-        })
+        products = [
+            {"plan_code": "PLAN_A", "link_label": "查看 1000M 方案"},
+            {"plan_code": "PLAN_B", "link_label": "查看第 2 款"},
+        ]
+        self.assertEqual(context["link_products"], products)
+        self.assertEqual(self.product_link(context), {"frontend_action": "SHOW_PRODUCT_LINK", "products": products})
         selection["assessments"][1]["link_label"] = "查看 1000M 方案"
         checked = self.run_node["validate_selection"](
             json.dumps(selection), json.dumps(candidates), '{"requirements": []}',
@@ -293,7 +295,8 @@ class CustomerTurnPolicyTests(unittest.TestCase):
         self.assertEqual(self.product_link(self.run_node["reply_context"](reply, "包唔包漫遊？")), no_action)
         for mode in ("availability", "interview", "request_address", "no_match", "error"):
             with self.subTest(mode=mode):
-                self.assertEqual(self.product_link({**context, "mode": mode}), no_action)
+                context_for_mode = self.run_node["reply_context"]({**reply, "mode": mode}, message)
+                self.assertEqual(self.product_link(context_for_mode), no_action)
         reply["selected_plans"].append({"plan_code": "PLAN_B", "markdown": "另一款計劃"})
         ambiguous = self.run_node["reply_context"](reply, message)
         self.assertIn("只問客戶想要邊款", ambiguous["instruction"])
