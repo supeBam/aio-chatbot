@@ -12163,9 +12163,10 @@ workflow:
       zIndex: 1001
     - data:
         code: |
-          def main(products):
+          def main(products, service_type):
               return {
                   "frontend_action": "SHOW_PRODUCT_LINK" if products else "NONE",
+                  "service_type": service_type,
                   "products": products,
               }
         code_language: python3
@@ -12176,6 +12177,9 @@ workflow:
           products:
             children: null
             type: array[object]
+          service_type:
+            children: null
+            type: string
         selected: false
         title: 输出套餐办理链接动作
         type: code
@@ -12185,6 +12189,11 @@ workflow:
           - link_products
           value_type: array[object]
           variable: products
+        - value_selector:
+          - reply_context
+          - business
+          value_type: string
+          variable: service_type
       height: 52
       id: product_link_action
       position:

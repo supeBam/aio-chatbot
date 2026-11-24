@@ -33,9 +33,10 @@ LINK_PRODUCTS_CODE = r'''def build_link_products(mode, link_requested, plans):
 '''
 
 
-PRODUCT_LINK_CODE = '''def main(products):
+PRODUCT_LINK_CODE = '''def main(products, service_type):
     return {
         "frontend_action": "SHOW_PRODUCT_LINK" if products else "NONE",
+        "service_type": service_type,
         "products": products,
     }
 '''
@@ -186,9 +187,17 @@ def apply_product_link_policy(graph):
             "outputs": {
                 "frontend_action": {"children": None, "type": "string"},
                 "products": {"children": None, "type": "array[object]"},
+                "service_type": {"children": None, "type": "string"},
             },
             "selected": False, "title": "输出套餐办理链接动作", "type": "code",
-            "variables": [copy.deepcopy(LINK_PRODUCTS_INPUT)],
+            "variables": [
+                copy.deepcopy(LINK_PRODUCTS_INPUT),
+                {
+                    "value_selector": ["reply_context", "business"],
+                    "value_type": "string",
+                    "variable": "service_type",
+                },
+            ],
         },
         "height": 52, "id": node_id, "position": position, "positionAbsolute": dict(position),
         "selected": False, "sourcePosition": "right", "targetPosition": "left",
