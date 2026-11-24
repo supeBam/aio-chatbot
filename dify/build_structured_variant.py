@@ -9,9 +9,11 @@ import yaml
 if __package__:
     from .customer_turn_policy import apply_customer_turn_policy
     from .model_output_schemas import MODEL_SCHEMAS, RECOMMENDATION_LIMIT
+    from .product_link_policy import apply_product_link_policy
 else:
     from customer_turn_policy import apply_customer_turn_policy
     from model_output_schemas import MODEL_SCHEMAS, RECOMMENDATION_LIMIT
+    from product_link_policy import apply_product_link_policy
 
 
 DIRECTORY = Path(__file__).resolve().parent
@@ -207,6 +209,7 @@ def build(flow):
 
     configure_customer_replies(flow, nodes)
     apply_customer_turn_policy(nodes)
+    apply_product_link_policy(graph)
     return flow
 
 

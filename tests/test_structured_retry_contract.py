@@ -72,7 +72,7 @@ class StructuredRetryContractTests(unittest.TestCase):
 
     def test_captured_null_reason_is_rejected_but_contract_output_passes_real_validators(self):
         output = {
-            "assessments": [{"plan_code": "MTOC30G98", "requirements": [], "info_answers": []}],
+            "assessments": [{"plan_code": "MTOC30G98", "link_label": "", "requirements": [], "info_answers": []}],
             "reason": "核对当前候选",
         }
         schema = self.nodes["select"]["structured_output"]["schema"]

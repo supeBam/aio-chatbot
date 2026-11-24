@@ -46,6 +46,7 @@ MODEL_SCHEMAS = {
     }),
     "extract": object_schema({
         "turn_intent": enum_schema("shop", "lookup", "availability"),
+        "link_request": TEXT,
         "availability_scope": enum_schema("catalog", "current_purchase"),
         "turn_conditions": array_schema(object_schema({"text": TEXT, "evidence": EVIDENCE}), 20),
         "temporarily_excluded_ids": array_schema(TEXT, 100),
@@ -68,6 +69,7 @@ MODEL_SCHEMAS = {
     "select": object_schema({
         "assessments": array_schema(object_schema({
             "plan_code": TEXT,
+            "link_label": TEXT,
             "requirements": array_schema(object_schema({
                 "requirement_id": TEXT, "status": enum_schema("supported", "unsupported", "unknown"),
                 "quote": TEXT, "explanation": TEXT,

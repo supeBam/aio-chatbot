@@ -94,9 +94,12 @@
 |---|---|---|
 | 准备流式回复上下文，不包装聊天JSON | `reply_context` | 整理回复模式、用户原话、需求、目录和精选结果；准备供最终 LLM 使用的上下文，不把回复包装成聊天 JSON。 |
 | 先输出前端弹表单动作 | `address_action` | 输出前端动作 `request_address`，由前端触发表单流程；不是聊天文本，也不应改成在聊天中索取完整地址。 |
+| 输出套餐办理链接动作 | `product_link_action` | `answer` 后输出本轮 `frontend_action` 和 `products`。推荐输出一到两款。明确索取办理链接时，仅在当前可售套餐能唯一定位时输出。 |
 | 完整回复后记录本业务上下文 | `record_reply` | 在最终回复后写回实际回复和访谈状态；供下一轮业务路由、需求理解及追问延续使用。 |
 
-### 3.6 LLM 节点失败处理
+前端从当前运行中成功完成的 `product_link_action` 节点读取 `data.outputs`。`frontend_action` 为 `SHOW_PRODUCT_LINK` 时，按 `products` 的顺序在流式正文结束后展示入口。每项的 `link_label` 用于显示，`plan_code` 用于沿用现有跳转规则。无法生成有效地址的单项可以省略。无入口时动作是 `NONE`，`products` 为空数组。接入时需确认 SSE 通道会透传该节点的动态输出。
+
+## 3.6 LLM 节点失败处理
 
 | 画布标题（Dify 显示） | 节点 ID（配置标识） | 职责 |
 |---|---|---|

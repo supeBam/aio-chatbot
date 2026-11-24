@@ -226,6 +226,79 @@ class CustomerTurnPolicyTests(unittest.TestCase):
         self.assertEqual([plan["plan_code"] for plan in reply["selected_plans"]], ["MATCH"])
         self.assertEqual(reply["snapshot"]["ms_needs"]["requirements"], [])
 
+    def product_link(self, context):
+        return self.run_node["product_link_action"](
+            context["mode"], context["link_requested"], context["selected_plans_json"],
+        )
+
+    def test_recommendation_keeps_both_links_when_model_omits_a_label(self):
+        candidates = [
+            {"plan_code": "PLAN_A", "markdown": "上網速度 1000M"},
+            {"plan_code": "PLAN_B", "markdown": "上網速度 2500M"},
+        ]
+        selection = {"reason": "按需要排序", "assessments": [
+            {"plan_code": "PLAN_A", "requirements": [], "link_label": "查看 1000M 方案"},
+            {"plan_code": "PLAN_B", "requirements": []},
+        ]}
+        checked = self.run_node["validate_selection"](
+            json.dumps(selection), json.dumps(candidates), '{"requirements": []}',
+        )
+        self.assertEqual(checked["error"], "")
+        bundle = {"snapshot": self.snapshot, "business": "BN", "mode": "recommend",
+                  "instruction": "", "persist_reply": True, "interview_topic": ""}
+        reply = self.run_node["recommendation"](bundle, checked["recommendations_json"], "", "")["bundle"]
+        context = self.run_node["reply_context"](reply, "推介兩款寬頻")
+        self.assertEqual(self.product_link(context), {
+            "frontend_action": "SHOW_PRODUCT_LINK", "products": [
+                {"plan_code": "PLAN_A", "link_label": "查看 1000M 方案"},
+                {"plan_code": "PLAN_B", "link_label": "查看第 2 款"},
+            ],
+        })
+        selection["assessments"][1]["link_label"] = "查看 1000M 方案"
+        checked = self.run_node["validate_selection"](
+            json.dumps(selection), json.dumps(candidates), '{"requirements": []}',
+        )
+        self.assertEqual(json.loads(checked["recommendations_json"])[1]["link_label"], "")
+
+    def test_requested_link_requires_current_evidence_and_unique_verified_plan(self):
+        message = "俾條申請連結我"
+        bundle = self.merge(message, turn_intent="lookup", link_request=message, question_changes=[
+            {"business": "MS", "operation": "add", "question_id": "", "text": message, "evidence": [message]},
+        ])
+        plans = self.run_node["fetch_tags"]("MS", self.snapshot)["bundle"]["plans_tags"]
+        bundle["snapshot"]["ms_catalog_status"] = "ready"
+        bundle["snapshot"]["ms_needs"]["last_recommended_codes"] = [plans[0]["plan_code"]]
+        code = plans[0]["plan_code"]
+        choice = {"action": "recommend", "selected_plan_codes": [code], "follow_up": None, "reason": "定位指定套餐"}
+        decision = self.run_node["product_decision"](bundle, plans, json.dumps(choice))
+        self.assertEqual(decision["bundle"]["mode"], "lookup")
+        ranked = self.run_node["rank"](decision["bundle"], plans, decision["shortlist_json"])
+        self.assertEqual(ranked["error"], "")
+        selection = {"reason": "核對指定套餐", "assessments": [
+            {"plan_code": code, "requirements": [], "info_answers": [
+                {"question_id": "Q1", "status": "unknown", "quote": "", "answer": "原文沒有辦理網址"},
+            ]},
+        ]}
+        needs_json = self.run_node["decision_state"](bundle)["needs_json"]
+        checked = self.run_node["validate_selection"](
+            json.dumps(selection), ranked["sales_candidates_json"], needs_json,
+        )
+        self.assertEqual(checked["error"], "")
+        reply = self.run_node["recommendation"](
+            decision["bundle"], checked["recommendations_json"], "", "",
+        )["bundle"]
+        context = self.run_node["reply_context"](reply, message)
+        self.assertEqual(self.product_link(context)["products"], [{"plan_code": code, "link_label": "查看計劃"}])
+        no_action = {"frontend_action": "NONE", "products": []}
+        self.assertEqual(self.product_link(self.run_node["reply_context"](reply, "包唔包漫遊？")), no_action)
+        for mode in ("availability", "interview", "request_address", "no_match", "error"):
+            with self.subTest(mode=mode):
+                self.assertEqual(self.product_link({**context, "mode": mode}), no_action)
+        reply["selected_plans"].append({"plan_code": "PLAN_B", "markdown": "另一款計劃"})
+        ambiguous = self.run_node["reply_context"](reply, message)
+        self.assertIn("只問客戶想要邊款", ambiguous["instruction"])
+        self.assertEqual(self.product_link(ambiguous), no_action)
+
     def test_whole_plan_fee_is_read_from_basic_information(self):
         plans = self.run_node["fetch_tags"]("XE", self.snapshot)["bundle"]["plans_tags"]
         self.snapshot["xe_needs"]["ready_to_recommend"] = True
