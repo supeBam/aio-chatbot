@@ -437,6 +437,71 @@ class CustomerTurnPolicyTests(unittest.TestCase):
         self.assertEqual(mixed["turn_requirements"][0]["priority"], "preferred")
         self.assertEqual(mixed["turn_requirements"][0]["evidence"], ["最好流量高"])
 
+    def test_bn_temporary_selection_delivers_ordered_links_without_recommendation_quote(self):
+        message = "需要1G寬頻，月費低過$198，你哋有冇得平"
+        codes = ["AX9836ROB", "AX10924DB"]
+        self.snapshot.update(current_business="BN", bn_scope_codes=codes)
+        bundle = self.merge(
+            message, business="BN", turn_intent="availability", delivery_goal="selection",
+            turn_conditions=[
+                {"text": "需要1G宽频", "evidence": ["需要1G寬頻"]},
+                {"text": "月费低于$198", "evidence": ["月費低過$198"]},
+            ],
+        )
+        self.assertEqual(bundle["snapshot"]["bn_needs"]["requirements"], [])
+        bundle.update(mode="availability", selected_plans=[
+            {"plan_code": code, "markdown": f"方案名称: {name}"}
+            for code, name in zip(codes, ["1000M連路由器", "1000M家居寬頻"])
+        ])
+        context = self.run_node["reply_context"](bundle, "")
+        self.assertEqual(self.product_link(context)["frontend_action"], "SHOW_PRODUCT_LINK")
+        self.assertEqual([item["plan_code"] for item in context["link_products"]], codes)
+        self.assertEqual(context["presentation"]["plan_codes"], codes)
+        self.assertLess(context["plan_summary"].index(codes[0]), context["plan_summary"].index(codes[1]))
+        saved = self.record_reply(context, "兩款主要分別係合約期。")
+        self.assertEqual(saved["bn_needs"]["last_recommended_codes"], codes)
+
+        self.snapshot = copy.deepcopy(saved)
+        question = "第二款係咪自動續約？"
+        facts = self.merge(question, business="BN", turn_intent="lookup", delivery_goal="facts",
+                           question_changes=[{"business": "BN", "operation": "add", "question_id": "",
+                                              "text": question, "evidence": [question]}])
+        facts.update(mode="lookup", selected_plans=[bundle["selected_plans"][1]])
+        context = self.run_node["reply_context"](facts, question)
+        self.assertEqual(self.product_link(context)["frontend_action"], "NONE")
+        self.snapshot = self.record_reply(context, "暫時未核實自動續約條款。")
+        self.assertEqual(self.snapshot["bn_needs"]["last_recommended_codes"], codes)
+        link = "畀第二款嘅辦理連結"
+        lookup = self.merge(link, business="BN", turn_intent="lookup", delivery_goal="link",
+                            link_request=link, question_changes=[
+                                {"business": "BN", "operation": "add", "question_id": "",
+                                 "text": link, "evidence": [link]},
+                            ])
+        tags = self.run_node["fetch_tags"]("BN", lookup["snapshot"])["bundle"]["plans_tags"]
+        choice = {"action": "recommend", "selected_plan_codes": [codes[0]], "follow_up": None, "reason": "核對"}
+        wrong = self.run_node["product_decision"](lookup, tags, json.dumps(choice))
+        self.assertEqual(wrong["bundle"]["mode"], "error")
+        choice["selected_plan_codes"] = [codes[1]]
+        correct = self.run_node["product_decision"](lookup, tags, json.dumps(choice))
+        self.assertEqual(correct["bundle"]["mode"], "lookup")
+        correct["bundle"]["selected_plans"] = [bundle["selected_plans"][1]]
+        self.assertEqual(self.product_link(self.run_node["reply_context"](correct["bundle"], link))["products"][0]["plan_code"],
+                         codes[1])
+
+        changed = self.run_node["ingress"]("已更改地址", "address_change", "AX10924DB", **saved)
+        self.assertTrue(changed["ok"], changed["error"])
+        self.assertEqual(changed["snapshot"]["bn_needs"]["last_recommended_codes"], [])
+        resumed = self.run_node["merge"]("", changed["snapshot"], "BN", "address_change")["bundle"]
+        self.assertEqual(resumed["delivery_goal"], "selection")
+        self.assertEqual(resumed["turn_requirements"], bundle["turn_requirements"])
+        self.assertEqual(resumed["snapshot"]["bn_scope_codes"], ["AX10924DB"])
+        self.assertEqual(resumed["selected_plans"], [])
+        stale = {**resumed, "mode": "availability", "selected_plans": [bundle["selected_plans"][0]]}
+        context = self.run_node["reply_context"](stale, "")
+        self.assertEqual(context["mode"], "no_match")
+        self.assertEqual(context["plan_summary"], "")
+        self.assertEqual(self.product_link(context)["frontend_action"], "NONE")
+
     def test_no_match_still_passes_explicit_questions_and_current_evidence(self):
         message = "我想加多个D+一起登记，有没优惠？"
         bundle = self.merge(message, question_changes=[{
@@ -530,6 +595,7 @@ class CustomerTurnPolicyTests(unittest.TestCase):
             json.dumps(selection), json.dumps(candidates), '{"requirements": []}',
         )
         self.assertEqual(checked["error"], "")
+        self.snapshot["bn_scope_codes"] = ["PLAN_A", "PLAN_B"]
         bundle = {"snapshot": self.snapshot, "business": "BN", "mode": "recommend",
                   "instruction": "", "persist_reply": True, "interview_topic": ""}
         reply = self.run_node["recommendation"](bundle, checked["recommendations_json"], "", "")["bundle"]
@@ -581,7 +647,12 @@ class CustomerTurnPolicyTests(unittest.TestCase):
             "products": [{"plan_code": code, "link_label": "查看計劃"}],
         })
         no_action = {"frontend_action": "NONE", "service_type": "MS", "products": []}
-        self.assertEqual(self.product_link(self.run_node["reply_context"](reply, "包唔包漫遊？")), no_action)
+        facts = self.merge("包唔包漫遊？", turn_intent="lookup", delivery_goal="facts", question_changes=[{
+            "business": "MS", "operation": "add", "question_id": "",
+            "text": "包唔包漫遊？", "evidence": ["包唔包漫遊？"],
+        }])
+        facts.update(mode="lookup", selected_plans=reply["selected_plans"])
+        self.assertEqual(self.product_link(self.run_node["reply_context"](facts, "包唔包漫遊？")), no_action)
         for mode in ("availability", "interview", "request_address", "no_match", "error"):
             with self.subTest(mode=mode):
                 context_for_mode = self.run_node["reply_context"]({**reply, "mode": mode}, message)

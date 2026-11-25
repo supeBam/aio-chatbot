@@ -47,7 +47,7 @@ MODEL_SCHEMAS = {
     "extract": object_schema({
         "turn_intent": enum_schema("shop", "lookup", "availability"),
         "link_request": TEXT,
-        "catalog_recommendation": TEXT,
+        "delivery_goal": enum_schema("selection", "facts", "link"),
         "availability_scope": enum_schema("catalog", "current_purchase"),
         "turn_conditions": array_schema(object_schema({
             "text": TEXT, "evidence": EVIDENCE,
