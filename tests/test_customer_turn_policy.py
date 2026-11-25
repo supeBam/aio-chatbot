@@ -74,6 +74,30 @@ class CustomerTurnPolicyTests(unittest.TestCase):
         self.assertEqual([item["id"] for item in current["requirements"]], ["T1"])
         self.assertEqual(alternative["snapshot"]["ms_needs"]["requirements"], [existing])
 
+    def test_xe_catalog_query_does_not_filter_by_contract_when_customer_has_no_preference(self):
+        message = "有冇$80左右，不考虑合约期disney+推荐"
+        bundle = self.merge(
+            message, business="XE", turn_intent="availability",
+            catalog_recommendation="disney+推荐",
+            turn_conditions=[
+                {"text": "月费约$80", "evidence": ["$80左右"]},
+                {"text": "不考虑合约期", "evidence": ["不考虑合约期"]},
+                {"text": "Disney+计划", "evidence": ["disney+"]},
+            ],
+        )
+        needs = json.loads(self.run_node["decision_state"](bundle)["needs_json"])
+        self.assertEqual([(item["id"], item["text"]) for item in needs["requirements"]], [
+            ("T1", "月费约$80"), ("T2", "Disney+计划"),
+        ])
+        self.assertEqual(bundle["catalog_recommendation"], "disney+推荐")
+
+        message = "有冇唔想綁合約嘅Disney+計劃"
+        bundle = self.merge(
+            message, business="XE", turn_intent="availability",
+            turn_conditions=[{"text": "要求無合約期限制", "evidence": ["唔想綁合約"]}],
+        )
+        self.assertEqual([item["text"] for item in bundle["turn_requirements"]], ["要求無合約期限制"])
+
     def test_home_phone_availability_does_not_inherit_previous_broadband_filters(self):
         conditions = [
             {"id": "R1", "text": "月費$130內", "priority": "required", "attitude": "interested", "evidence": ["130內"]},
@@ -325,6 +349,7 @@ class CustomerTurnPolicyTests(unittest.TestCase):
                 self.assertEqual(json.loads(context["selected_plans_json"])[0]["plan_code"], code)
                 action = self.product_link(context)
                 self.assertEqual(action["frontend_action"], expected_action)
+                self.assertEqual("按推薦版式" in context["instruction"], expected_action == "SHOW_PRODUCT_LINK")
                 self.assertEqual(action["products"], (
                     [{"plan_code": code, "link_label": "查看計劃"}] if expected_action == "SHOW_PRODUCT_LINK" else []
                 ))
@@ -359,6 +384,130 @@ class CustomerTurnPolicyTests(unittest.TestCase):
         next_turn = self.run_node["decision_state"]({**bundle, "snapshot": saved, "mode": "lookup"})
         comparison = json.loads(next_turn["comparison_context_json"])
         self.assertEqual([plan["plan_code"] for plan in comparison["previous_recommendations"]], codes)
+
+    def test_bn_address_callback_keeps_validated_catalog_recommendation(self):
+        message = "有無咩寬頻Plan推介？"
+        codes = ["AX9836ROB", "AU14924HTOOTT_C3F24NOR30IDD"]
+        self.snapshot["bn_scope_codes"] = codes
+        bundle = self.merge(
+            message, business="BN", turn_intent="availability", catalog_recommendation=message,
+            turn_conditions=[{"text": "家居宽频计划", "evidence": [message]}],
+        )
+        bundle.update(mode="availability", selected_plans=[
+            {"plan_code": code, "markdown": "提供家居寬頻"} for code in codes
+        ])
+        context = self.run_node["reply_context"](bundle, "")
+        self.assertIn("今次揀咗", context["instruction"])
+        self.assertIn("{plan_code}", context["instruction"])
+        action = self.product_link(context)
+        self.assertEqual(action["frontend_action"], "SHOW_PRODUCT_LINK")
+        self.assertEqual([plan["plan_code"] for plan in action["products"]], codes)
+
+    def test_ms_catalog_preference_does_not_block_a_verified_candidate(self):
+        message = "有冇流动通讯plan推荐？最好流量高"
+        bundle = self.merge(
+            message, turn_intent="availability", catalog_recommendation=message,
+            turn_conditions=[{"text": "流动通讯计划流量高", "evidence": ["最好流量高"]}],
+        )
+        needs = self.run_node["decision_state"](bundle)["needs_json"]
+        self.assertEqual(json.loads(needs)["requirements"][0]["priority"], "preferred")
+        code = "MC5G100G3BAC"
+        checked = self.run_node["validate_selection"](
+            json.dumps({"reason": "已核对", "assessments": [{
+                "plan_code": code, "info_answers": [], "requirements": [{
+                    "requirement_id": "T1", "status": "unknown", "quote": "",
+                    "explanation": "原文明示100GB，用户未给流量门槛",
+                }],
+            }]}),
+            json.dumps([{"plan_code": code, "markdown": "本地流動數據:100GB"}]), needs,
+        )
+        self.assertEqual(checked["error"], "")
+        self.assertEqual([item["plan_code"] for item in json.loads(checked["recommendations_json"])], [code])
+        hard = self.merge(
+            "至少100GB", turn_intent="availability",
+            turn_conditions=[{"text": "至少100GB", "priority": "required", "evidence": ["至少100GB"]}],
+        )
+        self.assertEqual(hard["turn_requirements"][0]["priority"], "required")
+
+        mixed = self.merge(
+            message, turn_intent="availability",
+            turn_conditions=[{"text": "流动通讯计划，最好流量高",
+                              "evidence": ["流动通讯plan", "最好流量高"]}],
+        )
+        self.assertEqual(mixed["turn_requirements"][0]["priority"], "preferred")
+        self.assertEqual(mixed["turn_requirements"][0]["evidence"], ["最好流量高"])
+
+    def test_no_match_still_passes_explicit_questions_and_current_evidence(self):
+        message = "我想加多个D+一起登记，有没优惠？"
+        bundle = self.merge(message, question_changes=[{
+            "business": "MS", "operation": "add", "question_id": "",
+            "text": "一起登记有没优惠？", "evidence": ["有没优惠？"],
+        }])
+        bundle["mode"] = "recommend"
+        candidate = {"plan_code": "MT5G100GCNKD", "markdown": "回贈至同時登記之指定寬頻服務計劃"}
+        result = self.run_node["recommendation"](bundle, "[]", "", "", json.dumps([candidate]))["bundle"]
+        context = self.run_node["reply_context"](result, message)
+        needs = json.loads(context["needs_json"])
+        self.assertEqual(context["mode"], "no_match")
+        self.assertEqual([question["text"] for question in needs["questions"]], ["一起登记有没优惠？"])
+        self.assertEqual(needs["consultation_plans"], [candidate])
+        self.assertEqual(json.loads(context["selected_plans_json"]), [])
+        self.assertEqual(context["link_products"], [])
+
+        failed = self.run_node["recommendation"](bundle, "[]", "", "讀取失敗", json.dumps([candidate]))["bundle"]
+        context = self.run_node["reply_context"](failed, message)
+        self.assertEqual(context["mode"], "error")
+        self.assertNotIn("consultation_plans", json.loads(context["needs_json"]))
+
+    def test_reply_context_distinguishes_router_terms_and_surfaces_speed_conflict(self):
+        for business, codes in (
+            ("BN", ["AX9836ROB", "AW37827F3PROV", "AU14924HTOOTT_C3F24NOR30IDD"]),
+            ("MS", ["MC5G100G3BAC"]),
+        ):
+            with self.subTest(business=business):
+                self.snapshot["bn_scope_codes"] = codes if business == "BN" else []
+                self.snapshot[business.lower() + "_catalog_status"] = "ready"
+                self.snapshot[business.lower() + "_needs"]["ready_to_recommend"] = True
+                plans = self.run_node["fetch_tags"](business, self.snapshot)["bundle"]["plans_tags"]
+                bundle = {
+                    "snapshot": self.snapshot, "business": business, "mode": "recommend", "instruction": "",
+                    "persist_reply": True, "interview_topic": "",
+                }
+                ranked = self.run_node["rank"](bundle, plans, json.dumps({
+                    "selected_plan_codes": codes, "reason": "重播",
+                }))
+                self.assertEqual(ranked["error"], "")
+                candidates = json.loads(ranked["sales_candidates_json"])
+                shown = []
+                for plan in candidates:
+                    bundle["selected_plans"] = [plan]
+                    context = self.run_node["reply_context"](bundle, "有咩計劃推介")
+                    shown.extend(json.loads(context["selected_plans_json"]))
+                if business == "BN":
+                    self.assertEqual([plan["router_offer"] for plan in shown],
+                                     ["included", "required_add_on", "unconfirmed"])
+                    marketing = candidates[-1]
+                    quote = next(line for line in marketing["markdown"].splitlines() if "多元化的路由器方案" in line)
+                    outcome = self.run_node["validate_selection"](
+                        json.dumps({"reason": "核對路由器", "assessments": [{
+                            "plan_code": marketing["plan_code"], "requirements": [{
+                                "requirement_id": "T1", "status": "supported", "quote": quote,
+                                "explanation": "套餐包括路由器",
+                            }],
+                        }]}),
+                        json.dumps([marketing]),
+                        json.dumps({"requirements": [{"id": "T1", "text": "包含路由器", "priority": "required"}]}),
+                    )
+                    self.assertEqual(outcome["error"], "")
+                    self.assertEqual(json.loads(outcome["recommendations_json"]), [])
+                else:
+                    self.assertEqual(shown[0]["after_data_limit"]["speeds_mbps"], ["1", "5"])
+                    self.assertTrue(shown[0]["after_data_limit"]["conflict"])
+                    terms = shown[0]["booking_terms"]
+                    self.assertTrue(any("自動續約" in term for term in terms["renewal"]))
+                    self.assertTrue(terms["admin_fee_amounts_differ"])
+                    self.assertTrue(any("$28" in term for term in terms["admin_fee"]))
+                    self.assertTrue(any("$18" in term for term in terms["admin_fee"]))
 
     def product_link(self, context):
         variables = self.nodes["product_link_action"]["variables"]

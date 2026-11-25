@@ -14,6 +14,61 @@ def replace(text, old, new):
     return text.replace(old, new, 1)
 
 
+PLAN_FACTS_CODE = r'''def plan_facts(business, markdown):
+    lines = markdown.splitlines()
+    facts = {}
+    renewal = [line.removeprefix("- ") for line in lines
+               if re.match(r"^- 合[约約]期[：:]", line) and re.search(r"自[动動][续續][约約]", line)]
+    admin_fee = [line.removeprefix("- ") for line in lines
+                 if line.startswith("- ") and re.search(r"行政[费費]", line) and "$" in line]
+    if renewal or admin_fee:
+        amounts = {amount for line in admin_fee for amount in re.findall(r"\$\s*(\d+(?:\.\d+)?)", line)}
+        facts["booking_terms"] = {"renewal": renewal, "admin_fee": admin_fee,
+                                  "admin_fee_amounts_differ": len(amounts) > 1}
+    if business == "BN":
+        name = re.search(r"^方案名[称稱][：:][ \t]*([^\n]+)", markdown, re.M)
+        name = name.group(1) if name else ""
+        router = r"(?:路由器|\brouter\b)"
+        if re.search(r"(?:需|須|必須|必须)\s*(?:加購|加购|另購|另购).*" + router, name, re.I):
+            offer = "required_add_on"
+        elif re.search(r"(?:可選購|可选购|可加購|可加购).*" + router, name, re.I):
+            offer = "optional"
+        elif re.search(r"(?:連|连|附送|包括|包含).*" + router, name, re.I):
+            offer = "included"
+        else:
+            offer = "unconfirmed"
+        facts["router_offer"] = offer
+    if business == "MS":
+        speeds = set()
+        for line in lines:
+            if re.match(r"^\s*-?\s*(?:流量[后後][续續]安排[：:]|其[后後]|超[過过]首)", line):
+                speeds.update(float(value) for value in re.findall(r"([0-9]+(?:\.[0-9]+)?)\s*Mbps(?![A-Za-z])", line, re.I))
+        if speeds:
+            facts["after_data_limit"] = {
+                "speeds_mbps": [format(speed, "g") for speed in sorted(speeds)],
+                "conflict": len(speeds) > 1,
+            }
+    return facts
+
+
+'''
+
+
+SHORTLIST_TAGS_CODE = '''def shortlist_tags(tags):
+    other_tags = []
+    services = {}
+    for tag in sales_tags(tags):
+        service, separator, detail = tag.partition("；")
+        if service.startswith("服务: ") and separator:
+            services.setdefault(service, []).append(detail)
+        else:
+            other_tags.append(tag)
+    return other_tags + ["；".join([service, *dict.fromkeys(details)]) for service, details in services.items()]
+
+
+'''
+
+
 def apply_customer_turn_policy(nodes):
     nodes = {key: node["data"] for key, node in nodes.items()}
 
@@ -49,6 +104,7 @@ def apply_customer_turn_policy(nodes):
 - consult只用于简短回答能帮助选购的一般概念；现售计划详情和能否找到某类计划交shopping。家居宽频选购中问有没有家居电话计划，按BN查询可售宽频组合。纯感谢可用boundary，不展开或重推。
 - 家居宽频对话里，“我想要固话套餐”“想睇家居電話計劃”等新选购目标也走BN shopping，核对当前地址的宽频连家居电话组合。只有客户明说只要独立固话、不要宽频时，才按独立固话目标处理。
 - 宽频对话里，D+、Disney、Disney+ 都指 Disney+；“一期等级”“一起登记”“加多个”等结合上下文理解为宽频组合选购。若刚查过该组合，再问登记有无优惠，仍交 BN shopping 核对原组合。
+- 当前消息和相关对话只有串流服务选购，没有宽频或流动通讯组合的线索时，直接进入 XE shopping。月费和合约期本身不是组合线索。确有两种购买对象时，澄清问题要明确列出两种。
 """)
     edit_code(
         "prepare business_validation",
@@ -67,7 +123,9 @@ def apply_customer_turn_policy(nodes):
 - turn_intent=shop：用户在选计划或明确追加、修改、取消条件。确切指定的规格、明确要加入的服务及相对于上轮的调整方向是筛选条件，记录为required；“最好”等可让步偏好记为preferred。用原话支持更新，当前有效条件优先。用户允许替代时只放宽他同意放宽的维度。
 - turn_intent=lookup：问某款已指明的计划详情，例如“头先嗰款包唔包日本漫游”。只写本轮question_changes，不改购买条件；不要用助手回覆当事实。
 - 上一轮已展示同一宽频及订阅组合，客户重述想一起登记并问优惠、费用或条款时，优先视为lookup。把优惠写入question_changes；仅问“有冇優惠”不代表必须额外减价，不新增优惠硬条件。除非客户明确更改组合或明确说没有优惠就不考虑。
-- turn_intent=availability：问有无某类型计划。把当轮要核对的条件放到turn_conditions，每项附原话。疑问句里的新条件不默认写入长期记忆。用户在同一句明确确认了其他独立条件时仍可更新。
+- turn_intent=availability：问有无某类型计划。把当轮要核对的条件逐项放到turn_conditions，每项附原话及priority。硬性规格或门槛用required；“最好”“优先”等偏好用preferred，只用于排序。明确要求推介又没有数值门槛时，按候选实际规格比较，不能因为没有门槛就判定无匹配。疑问句里的新条件不默认写入长期记忆。
+- “不考虑合约期”“合约期无所谓”表示不按合约期筛选；availability 不为该维度新增 turn_conditions，沿用旧条件的查询应排除旧合约限制。只有明确要无合约时，才把无合约当成筛选条件。“月费约某金额”保留为目标价，只有明确说上限才按预算上限判断。
+- 延续选购时，“加多个服务”“加多個服務”通常是想多加一项服务。只有原话明确给出两个或更多订阅，才新增数量限制。一起登记与享有优惠是两项核对，分别保留。
 - availability_scope默认为catalog：只按本轮问的范围查当前可售目录，即使话题仍是同一业务，也不套用旧预算、速度或其他已保存条件。只有明确引用原范围，例如“照頭先啲條件，有冇包埋家居電話嘅？”或“如果淨係放寬到$200，有冇？”，才用current_purchase。“頭先嗰款包唔包”是lookup；“我要加埋家居電話”是shop。
 - 已推荐之后，若用户只说“我想要某类计划”或“推荐某类计划”，且没有说明要加进原来的选择，这是查询新选项，用availability/catalog。陈述句也适用。只有表达继续原选择、要把某项加进去或修改原条件时才合并；“固话、固定电话、家居电话”视为同一服务。
 - temporarily_excluded_ids默认为[]，仅在current_purchase下排除本轮范围以外的旧条件。只点名沿用旧预算时，保留预算，排除未被引用的旧网速等条件；“其他照舊”保留未被调整的条件。例如“其他照舊，如果預算加到$200有冇？”暂时替换预算，不改保存的条件。
@@ -77,7 +135,7 @@ def apply_customer_turn_policy(nodes):
 - 输出必须带turn_intent、availability_scope、turn_conditions、temporarily_excluded_ids、purchase_switch。临时查询范围仅用于availability；没有消息的地址事件沿用当前选购，五个字段分别为shop、catalog、[]、[]、null。
 
 例：刚推荐过每月$130内的1000M家居宽频，用户说“我想要固话套餐”。查当前地址可售的宽频连家居电话组合；旧条件保留给之后的原选购。
-{"changes":[],"question_changes":[],"clarification":"","reason":"本轮想睇家居电话计划，未说加进之前的选择","context_update":null,"turn_intent":"availability","availability_scope":"catalog","turn_conditions":[{"text":"家居宽频包含家居电话","evidence":["我想要固话套餐"]}],"temporarily_excluded_ids":[],"purchase_switch":null}
+{"changes":[],"question_changes":[],"clarification":"","reason":"本轮想睇家居电话计划，未说加进之前的选择","context_update":null,"turn_intent":"availability","availability_scope":"catalog","turn_conditions":[{"text":"家居宽频包含家居电话","evidence":["我想要固话套餐"],"priority":"required"}],"temporarily_excluded_ids":[],"purchase_switch":null}
 
 例：上轮刚展示两款上台计划；用户说“頭先嗰款包唔包日本漫遊？”。交下游定位可能指代的计划和核实，不新增购买条件。
 {"changes":[],"question_changes":[{"business":"MS","operation":"add","question_id":"","text":"用户指的上一轮计划是否包括日本漫游","evidence":["頭先嗰款包唔包日本漫遊？"]}],"clarification":"","reason":"核对上一轮计划详情","context_update":null,"turn_intent":"lookup","availability_scope":"catalog","turn_conditions":[],"temporarily_excluded_ids":[],"purchase_switch":null}
@@ -125,6 +183,9 @@ def apply_customer_turn_policy(nodes):
     # Expose archived scopes to extraction only. Downstream product selection uses the active purchase.
     edit_code(
         "catalog",
+        ('def main(bundle, snapshot, business):', SHORTLIST_TAGS_CODE + 'def main(bundle, snapshot, business):'),
+        ('"plans_tags_json": dump([\n            {"plan_code": plan["plan_code"], "tag": sales_tags(plan["tag"])} for plan in plans\n        ])',
+         '"plans_tags_json": json.dumps([\n            {"plan_code": plan["plan_code"], "tag": shortlist_tags(plan["tag"])} for plan in plans\n        ], ensure_ascii=False, separators=(",", ":"))'),
         ('    return {\n        "snapshot": snapshot, "process":',
          '''    active = snapshot[prefix + "_needs"]
     view = {key: value for key, value in active.items() if key != "purchase_archive"}
@@ -157,15 +218,35 @@ def apply_customer_turn_policy(nodes):
         if excluded_ids and availability_scope != "current_purchase":
             raise ValueError("只有沿用原选购时才需要逐项临时排除旧条件")
         turn_requirements = []
-        for index, item in enumerate(conditions, start=1):
-            if (not isinstance(item, dict) or set(item) != {"text", "evidence"}
+        no_contract_preference = re.compile(
+            r"(?:不考[虑慮]|唔考[虑慮])合[约約]期|合[约約]期(?:[无無]所[谓謂]|冇所謂|冇要求|不限|不[限拘])"
+        )
+        for item in conditions:
+            if (not isinstance(item, dict) or set(item) not in (
+                    {"text", "evidence"}, {"text", "evidence", "priority"})
                     or not isinstance(item["text"], str) or not item["text"].strip()
+                    or item.get("priority", "required") not in ("required", "preferred")
                     or operator_reference(item["text"])):
                 raise ValueError("临时查询条件无效")
             verify_evidence(item["evidence"])
-            turn_requirements.append({"id": "T" + str(index), "text": item["text"],
-                                      "evidence": item["evidence"], "attitude": "interested",
-                                      "priority": "required"})
+            if all(no_contract_preference.fullmatch(quote.strip(" ，,。！？!?"))
+                   for quote in item["evidence"]):
+                continue
+            priority = item.get("priority", "required")
+            text, evidence = item["text"], item["evidence"]
+            preference = [quote for quote in evidence
+                          if re.match(r"^(最好|優先|优先|如果可以|如果得)", quote.strip())]
+            business_only = r"流[动動]通[讯訊](?:[计計][划劃]|plan)?"
+            if preference and (len(preference) == len(evidence) or (
+                    business == "MS" and all(
+                        quote in preference or re.fullmatch(business_only, quote.strip(), re.I)
+                        for quote in evidence))):
+                priority = "preferred"
+                if len(preference) != len(evidence):
+                    text, evidence = " ".join(preference), preference
+            turn_requirements.append({"id": "T" + str(len(turn_requirements) + 1), "text": text,
+                                      "evidence": evidence, "attitude": "interested",
+                                      "priority": priority})
         if turn_intent == "lookup":
             if output["changes"] or output["context_update"] is not None:
                 raise ValueError("查询指定计划不得更新选购条件")
@@ -254,6 +335,8 @@ def apply_customer_turn_policy(nodes):
     add_policy("shortlist", """
 ## 本轮回复动作
 - shop按当前选购条件，availability按本轮查询范围，从全部可售标签中挑0至5款。结合本轮原话、有效条件、上下文及每款tag判断相关性，按核对价值排序；标签与硬条件明确冲突就排除。标签有具体相关线索但条款待核实时可以入选。只选值得读原文的计划，有几款选几款，不凑数，无合理候选返回[]。
+- 月费目标价按与目标的差距排序；明确的预算上限按是否超出筛选。客户没有合约期偏好时，有合约和无合约都可入选。
+- 对“最好流量高”这类无数值门槛的偏好，按目录中实际规格选择有比较价值的套餐。
 - lookup只定位客户所指的当前可售计划，明确对象选一款，两个合理指代最多选两款。确需客户辨别时用clarify；所指计划已不可售或无可核对对象时用recommend和空列表。禁止顺带挑其他计划。
 - 三种意图都只读取selected_plan_codes内的原文。空列表结束查询；原文不支持本轮条件时也不自动补查其他计划。
 - 相关问答尽量先答重点。追问每轮只问一个会改变选择的问题，不因轮数到了就推不符合的计划。
@@ -322,7 +405,7 @@ def apply_customer_turn_policy(nodes):
         request.update(selected_plan_codes=selected, shortlist_reason=output["reason"])''',
          '''        request.update(selected_plan_codes=selected, shortlist_reason=output["reason"])'''),
         ('def mock_rank_and_details(business, plans_tags, selected_plan_codes):',
-         '''def plan_monthly_fee(markdown):
+         PLAN_FACTS_CODE + '''def plan_monthly_fee(markdown):
     section = re.search(r"^###[ ]+基础信息[ ]*$\\n(.*?)(?=^#{1,6}[ ]|\\Z)", markdown, re.M | re.S)
     if section:
         price = re.search(r"^套餐参考月费[：:][ ]*([0-9]+(?:\\.[0-9]+)?)[ ]*$", section.group(1), re.M)
@@ -334,7 +417,8 @@ def mock_rank_and_details(business, plans_tags, selected_plan_codes):'''),
         ('        candidates.append({**plans_by_code[code], "markdown": DETAILS[business][code]})',
          '''        markdown = DETAILS[business][code]
         candidates.append({**plans_by_code[code], "markdown": markdown,
-                           "plan_monthly_fee": plan_monthly_fee(markdown)})'''),
+                           "plan_monthly_fee": plan_monthly_fee(markdown),
+                           **plan_facts(business, sales_document(markdown))})'''),
     )
     nodes["rank"]["title"] = "僅讀取本輪初篩計劃原文"
 
@@ -358,15 +442,31 @@ def mock_rank_and_details(business, plans_tags, selected_plan_codes):'''),
 - lookup只核对用户所指计划的问题，缺资料的答案标unknown。若有两个合理指代，必须一起核对才能答，不能只取其中一个；无可核对结果时返回空数组。不要用其他计划替换被问对象。
 - 用户想要 Disney+ 时，原文明确可选 Disney+ 的二选一组合可以满足选择该服务的需求。说明需要选 Disney+、适用档位和期数；若用户明确要求两项同时包含，按原文核对。核对优惠时，组合已包含或可选的权益与额外减价分别判断。
 - 预算上限、计划月费和价格比较一律用plan_monthly_fee核对，即当前原文「基础信息」中的「套餐参考月费」。有结论时引用该字段原文；缺少整套月费则标记unknown。不使用单项服务「优惠月费」回答月费问题，也不重新加总或扣减回赠。客户询问单项服务月费时，不把整套月费当作该服务月费；只提供整套套餐参考月费，并说明不提供单项服务月费。
+- 月费评估的解释和理由也只使用套餐参考月费。对目标价说明实际差距，不因为低于目标价就判定接近。回赠、预缴和必要另收费用按原文单独判断。
+- 只有preferred且方向明确时，可选原文规格符合该方向的套餐，列出实际数值。“最好流量高”用可核对的流量排序，未给门槛不构成淘汰理由。
+- 核对路由器等设备和权益时，只有该款原文明确列明附送才支持附送。若条款写明随套餐提供、可选、须另购或有预缴，保留对应条件。规格、功能或泛称有其他设备方案可选，对该款是否附送只能标为 unknown。
+- 使用 router_offer 判断套餐是否随附、须另购、可选或尚未确认。included 仅表示随套餐提供，费用仍须核对。after_data_limit 标记冲突时，说明资料有不同数值，不能从中选一个作确定承诺。
 """)
 
     edit_code(
         "select_validation validate_selection",
         ('        requirements = {item["id"] for item in needs["requirements"]}',
-         '''        requirements = {item["id"] for item in needs["requirements"]}
+         r'''        requirements = {item["id"] for item in needs["requirements"]}
         required_ids = {item["id"] for item in needs["requirements"]
                         if item.get("priority") == "required"}
+        router_inclusion_requests = {
+            item["id"] for item in needs["requirements"]
+            if item.get("attitude", "interested") == "interested"
+            and re.match(r"^(?:套餐|[計计][劃划])?\s*(?:需要|要求|要)?\s*(?:包含|包括|包埋|連|连)\s*(?:路由器|router\b)", item.get("text", ""), re.I)
+        }
         eligible = []'''),
+        ('            assessed[code] = assessment["requirements"]',
+         '''            offer = by_code[code].get("router_offer")
+            if offer in ("unconfirmed", "optional", "required_add_on"):
+                for item in assessment["requirements"]:
+                    if item["requirement_id"] in router_inclusion_requests and item["status"] == "supported":
+                        item.update(status="unknown", quote="", explanation="原文未确认路由器随该套餐提供。")
+            assessed[code] = assessment["requirements"]'''),
         ('            answered[code] = info_answers\n',
          '''            answered[code] = info_answers
             if all(item["status"] == "supported" for item in assessed[code]
@@ -381,6 +481,8 @@ def mock_rank_and_details(business, plans_tags, selected_plan_codes):'''),
     )
     edit_code(
         "recommendation",
+        ('def main(bundle, recommendations_json, selection_error, rank_error):',
+         'def main(bundle, recommendations_json, selection_error, rank_error, candidates_json="[]"):'),
         ('        bundle["selected_plans"] = json.loads(recommendations_json)',
          '''        plans = json.loads(recommendations_json)
         bundle["selected_plans"] = plans
@@ -388,8 +490,18 @@ def mock_rank_and_details(business, plans_tags, selected_plan_codes):'''),
         if mode == "lookup" and not plans:
             bundle.update(mode="lookup_unavailable", instruction="而家未能核實你問嗰款計劃。")
         elif mode in ("recommend", "availability") and not plans:
-            bundle.update(mode="no_match", instruction="")'''),
+            bundle.update(mode="no_match", instruction="")
+            needs = bundle["snapshot"][bundle["business"].lower() + "_needs"]
+            if needs["questions"]:
+                bundle["consultation_plans"] = [
+                    {"plan_code": plan["plan_code"], "markdown": plan["markdown"]}
+                    for plan in json.loads(candidates_json)
+                ]'''),
     )
+    nodes["recommendation"]["variables"].append({
+        "value_selector": ["rank", "sales_candidates_json"],
+        "value_type": "string", "variable": "candidates_json",
+    })
     edit_code(
         "reply_context",
         ('    if bundle["mode"] == "error":',
@@ -398,7 +510,10 @@ def mock_rank_and_details(business, plans_tags, selected_plan_codes):'''),
         excluded_ids = set(bundle.get("temporarily_excluded_ids", []))
         saved = needs["requirements"]
         current = [item for item in saved if item["id"] not in excluded_ids]
-        needs = {"requirements": current + bundle.get("turn_requirements", [])}
+        needs = {"requirements": current + bundle.get("turn_requirements", []),
+                 "questions": needs["questions"]}
+        if bundle["mode"] == "no_match" and needs["questions"]:
+            needs["consultation_plans"] = bundle.get("consultation_plans", [])
         if bundle["mode"] == "availability" and bundle.get("availability_scope") == "catalog":
             needs["previous_purchase_requirements"] = saved
     if bundle["mode"] == "error":'''),
@@ -455,9 +570,17 @@ def mock_rank_and_details(business, plans_tags, selected_plan_codes):'''),
     add_policy("reply", """
 ## 像香港電訊顧問咁答
 - 每輪只講有助揀計劃嘅重點；先答客戶最想知嘅嘢，唔重播之前講過嘅內容，唔順手展開無關建議。
+- clarify 要保留 instruction 入面需要客戶選擇嘅所有選項，唔好改成只確認其中一項。客戶話合約期唔影響揀計劃，就按冇合約期偏好理解。
 - 所有月費回答只列整套「計劃參考月費」，一律用plan_monthly_fee（原文「基礎信息」嘅「套餐參考月費」）。缺少呢個值時省略金額。客戶問單項服務月費時，說明只提供整套計劃參考月費，唔將整套月費當成單項服務月費，亦唔列單項「優惠月費」。必要另收費用照常列明，唔自行加總月費或再扣回贈。
-- no_match：用一句自然嘅香港粵語講今次暫時搵唔到符合條件嘅計劃，按客戶今輪問嘅規格、組合、預算或地址範圍組句。只交代今次結果，唔斷言全目錄冇貨或地址只支援某個上限。答完就停，唔推舊計劃或替代，亦唔追問。
-- availability：直接答有冇；有可以順帶講相關計劃嘅規格同整套參考月費，唔寫完整推介。提到某款時附上原有計劃編號，方便下一輪接住查。previous_purchase_requirements只可以用嚟提示與上一輪嘅明顯分別，例如今輪搵到嘅計劃超出舊預算，唔可以用佢判斷今輪有冇。客戶明確要求沿用原條件時，回覆講清楚查詢範圍。
+- 「月費及合約」用「計劃參考月費 $金額」報價。原文或評估提到單項服務某個月收幾多，只用嚟理解條款，唔並列成另一個月費，亦唔用單項收費期推斷整套計劃之後嘅月費。回贈、預繳、必要另收費用同自動續約按已核實條款交代。
+- 推介每款計劃時，月費及合約先交代原文列明嘅續約、行政費同必要收費，再講延遲生效等可選特色。booking_terms 有續約或行政費資料就要保留；行政費列有唔同金額，交代適用條件同金額待確認，唔自行揀其中一個，亦唔計入參考月費。
+- 「無合約期限制」只係合約期資料。取消、退款同續約各自按原文核實，未有相關條款就唔承諾可以隨時取消。
+- 同一款計劃嘅設備或權益前後用同一個結論，清楚交代係隨計劃附送、可選、另購定資料未列明。原文只提及設備規格或通用選項，就唔用「包」或「送」。結尾只總結已交代嘅取捨，唔新增或反轉結論。
+- router_offer 係每款嘅路由器狀態。included 只表示隨計劃提供，required_add_on 表示須另購，optional 表示可選，unconfirmed 表示資料未確認。推介流量時，列埋用完後嘅限制。after_data_limit.conflict 為 true 就說明資料有出入，唔承諾其中一個速度。
+- 本輪業務按 business 表述。客戶問一齊登記同優惠，要分別答能否組合及回贈適用條件。指定寬頻先有嘅回贈，唔當成流動通訊本身嘅優惠。
+- 轉述權益時，保留直接限定範圍嘅字眼，例如「部分節目」「首六個月」「指定計劃」同適用資格。
+- no_match：用一句自然嘅香港粵語講今次未搵到同時符合客戶條件嘅計劃，保留條件嘅組合，唔推斷全目錄情況。如果 questions 有其他明確問題，再用 consultation_plans 嘅本輪原文簡短逐項答；無依據就講暫未核實。呢啲資料只用嚟答問題，唔當作符合條件嘅推介或辦理入口。
+- availability：直接答有冇，簡短講已核實嘅規格同整套參考月費。instruction 要求按推薦版式時照版式展示。提到某款時附上原有計劃編號，方便下一輪接住查。previous_purchase_requirements 只供說明同上輪嘅明顯分別。客戶明確要求沿用原條件時，回覆講清楚查詢範圍。
 - 問登記優惠時，先交代已核實可揀嘅服務同整套參考月費。額外優惠未能核實，就只講未能確認有額外優惠，唔反過來否定已核實嘅計劃或權益。二選一要講清楚係可選其中一項。
 - lookup：只答客戶問到嘅已核實事實。如果「嗰款」有兩個合理指代，兩款答案一致就直接答；答案不同或未能一併核實，就只問客戶指邊一款。lookup_unavailable跟instruction簡短回覆，唔補推其他計劃。
 - boundary：無關問題只需一句帶返到揀電訊計劃。consult只答有助選擇嘅部分，通常一兩句足夠。

@@ -86,9 +86,10 @@ def configure_catalog_recommendation_links(nodes):
         prompt["text"], "## 本轮办理链接请求",
         "## 本轮目录推荐\n"
         "- turn_intent 為 availability 時，如果客戶今輪明確要求推介或揀出某類可售計劃，"
-        "catalog_recommendation 填最近一條客戶消息中表達推薦要求嘅逐字原話，"
+        "catalog_recommendation 填本輪待處理消息中表達推薦要求嘅逐字原話，"
         "例如「推介包日本漫遊嘅計劃」。沿用今輪查詢範圍，唔改舊購買條件。\n"
-        "- 只問有冇某類計劃、查單款詳情、其他意圖或地址事件，catalog_recommendation 填空字串。\n\n"
+        "- 填地址或回答澄清後，如果仍在處理同一個推介要求，沿用待處理消息中嘅原話。"
+        "只問有冇某類計劃、查單款詳情、已轉話題或冇待處理推介要求時，填空字串。\n\n"
         "## 本轮办理链接请求",
     )
     lines = prompt["text"].splitlines(keepends=True)
@@ -111,7 +112,7 @@ def configure_catalog_recommendation_links(nodes):
         if not isinstance(catalog_recommendation, str):
             raise ValueError("目录推荐请求必须为原话或空文本")
         if (turn_intent != "availability" or not catalog_recommendation.strip()
-                or not pending or catalog_recommendation not in pending[-1]):
+                or not any(catalog_recommendation in message for message in pending)):
             catalog_recommendation = ""''')
         data["code"] = replace(code, "link_request=link_request)",
                                "link_request=link_request, catalog_recommendation=catalog_recommendation)")
@@ -124,8 +125,11 @@ def configure_catalog_recommendation_links(nodes):
             or (mode == "lookup" and link_requested and len(plans) == 1)):''')
     code = replace(code, '    link_requested = bool(link_request and link_request in message)',
                    '''    link_requested = bool(link_request and link_request in message)
-    catalog_request = bundle.get("catalog_recommendation", "")
-    catalog_requested = bool(catalog_request and catalog_request in message)''')
+    catalog_requested = bool(bundle.get("catalog_recommendation"))''')
+    code = replace(code, '    if bundle["mode"] == "recommend":\n        two_plans =',
+                   '''    if bundle["mode"] == "recommend" or (bundle["mode"] == "availability" and catalog_requested):
+        instruction += "\\n按推薦版式展示本輪精選。可以用「今次揀咗」帶出計劃，唔將本輪精選數目說成可售總數。"
+        two_plans =''')
     context["code"] = replace(code, 'build_link_products(bundle["mode"], link_requested, bundle["selected_plans"])',
                               'build_link_products(bundle["mode"], link_requested, catalog_requested, bundle["selected_plans"])')
 

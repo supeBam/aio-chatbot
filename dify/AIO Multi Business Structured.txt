@@ -2141,6 +2141,7 @@ workflow:
             - consult只用于简短回答能帮助选购的一般概念；现售计划详情和能否找到某类计划交shopping。家居宽频选购中问有没有家居电话计划，按BN查询可售宽频组合。纯感谢可用boundary，不展开或重推。
             - 家居宽频对话里，“我想要固话套餐”“想睇家居電話計劃”等新选购目标也走BN shopping，核对当前地址的宽频连家居电话组合。只有客户明说只要独立固话、不要宽频时，才按独立固话目标处理。
             - 宽频对话里，D+、Disney、Disney+ 都指 Disney+；“一期等级”“一起登记”“加多个”等结合上下文理解为宽频组合选购。若刚查过该组合，再问登记有无优惠，仍交 BN shopping 核对原组合。
+            - 当前消息和相关对话只有串流服务选购，没有宽频或流动通讯组合的线索时，直接进入 XE shopping。月费和合约期本身不是组合线索。确有两种购买对象时，澄清问题要明确列出两种。
 
             ## 办理链接
             - 客戶索取某款計劃嘅申請、登記或辦理連結時，按該計劃所屬業務走 shopping。用最近推薦或澄清語境理解指代。業務不明才先確認。
@@ -4815,8 +4816,19 @@ workflow:
           \ interview_topic=\"\"):\n    return {\n        \"snapshot\": snapshot,\
           \ \"business\": business, \"mode\": mode,\n        \"instruction\": instruction,\
           \ \"selected_plans\": selected_plans or [],\n        \"persist_reply\":\
-          \ persist_reply, \"interview_topic\": interview_topic\n    }\n\ndef main(bundle,\
-          \ snapshot, business):\n    snapshot = clone(snapshot)\n    prefix = business.lower()\n\
+          \ persist_reply, \"interview_topic\": interview_topic\n    }\n\ndef shortlist_tags(tags):\n\
+          \x20   other_tags = []\n\
+          \x20   services = {}\n\
+          \x20   for tag in sales_tags(tags):\n\
+          \x20       service, separator, detail = tag.partition(\"；\")\n\
+          \x20       if service.startswith(\"服务: \") and separator:\n\
+          \x20           services.setdefault(service, []).append(detail)\n\
+          \x20       else:\n\
+          \x20           other_tags.append(tag)\n\
+          \x20   return other_tags + [\"；\".join([service, *dict.fromkeys(details)]) for service, details in services.items()]\n\
+          \n\
+          \n\
+          def main(bundle, snapshot, business):\n    snapshot = clone(snapshot)\n    prefix = business.lower()\n\
           \    status, plans = bundle[\"status\"], validate_tags(bundle[\"plans_tags\"\
           ])\n    if bundle[\"request_json\"]:\n        snapshot[prefix + \"_catalog_status\"\
           ] = status\n        snapshot[prefix + \"_plans_tags\"] = plans\n    if status\
@@ -4834,9 +4846,9 @@ workflow:
           \x20       for key, saved in active.get(\"purchase_archive\", {}).items()\n\
           \x20   }\n    return {\n        \"snapshot\": snapshot, \"process\"\
           : mode == \"process\",\n        \"business\": business, \"mode\": mode,\
-          \ \"instruction\": instruction,\n        \"plans_tags\": plans, \"plans_tags_json\"\
-          : dump([\n            {\"plan_code\": plan[\"plan_code\"], \"tag\": sales_tags(plan[\"\
-          tag\"])} for plan in plans\n        ]),\n        \"needs_json\": dump(view)\n    }\n"
+          \ \"instruction\": instruction,\n        \"plans_tags\": plans, \"plans_tags_json\": json.dumps([\n\
+          \x20           {\"plan_code\": plan[\"plan_code\"], \"tag\": shortlist_tags(plan[\"tag\"])} for plan in plans\n\
+          \x20       ], ensure_ascii=False, separators=(\",\", \":\")),\n        \"needs_json\": dump(view)\n    }\n"
         code_language: python3
         outputs:
           business:
@@ -5665,7 +5677,12 @@ workflow:
 
             - 上一轮已展示同一宽频及订阅组合，客户重述想一起登记并问优惠、费用或条款时，优先视为lookup。把优惠写入question_changes；仅问“有冇優惠”不代表必须额外减价，不新增优惠硬条件。除非客户明确更改组合或明确说没有优惠就不考虑。
 
-            - turn_intent=availability：问有无某类型计划。把当轮要核对的条件放到turn_conditions，每项附原话。疑问句里的新条件不默认写入长期记忆。用户在同一句明确确认了其他独立条件时仍可更新。
+            - turn_intent=availability：问有无某类型计划。把当轮要核对的条件逐项放到turn_conditions，每项附原话及priority。硬性规格或门槛用required；“最好”“优先”等偏好用preferred，只用于排序。明确要求推介又没有数值门槛时，按候选实际规格比较，不能因为没有门槛就判定无匹配。疑问句里的新条件不默认写入长期记忆。
+
+            - “不考虑合约期”“合约期无所谓”表示不按合约期筛选；availability 不为该维度新增 turn_conditions，沿用旧条件的查询应排除旧合约限制。只有明确要无合约时，才把无合约当成筛选条件。“月费约某金额”保留为目标价，只有明确说上限才按预算上限判断。
+
+            - 延续选购时，“加多个服务”“加多個服務”通常是想多加一项服务。只有原话明确给出两个或更多订阅，才新增数量限制。一起登记与享有优惠是两项核对，分别保留。
+
 
             - availability_scope默认为catalog：只按本轮问的范围查当前可售目录，即使话题仍是同一业务，也不套用旧预算、速度或其他已保存条件。只有明确引用原范围，例如“照頭先啲條件，有冇包埋家居電話嘅？”或“如果淨係放寬到$200，有冇？”，才用current_purchase。“頭先嗰款包唔包”是lookup；“我要加埋家居電話”是shop。
 
@@ -5687,7 +5704,7 @@ workflow:
             {"changes": [], "question_changes": [], "clarification": "", "reason":
             "本轮想睇家居电话计划，未说加进之前的选择", "context_update": null, "turn_intent": "availability",
             "availability_scope": "catalog", "turn_conditions": [{"text": "家居宽频包含家居电话",
-            "evidence": ["我想要固话套餐"]}], "temporarily_excluded_ids": [], "purchase_switch":
+            "evidence": ["我想要固话套餐"], "priority": "required"}], "temporarily_excluded_ids": [], "purchase_switch":
             null, "link_request": "", "catalog_recommendation": ""}
 
 
@@ -5714,9 +5731,9 @@ workflow:
             ## 本轮目录推荐
 
             - turn_intent 為 availability 時，如果客戶今輪明確要求推介或揀出某類可售計劃，catalog_recommendation
-            填最近一條客戶消息中表達推薦要求嘅逐字原話，例如「推介包日本漫遊嘅計劃」。沿用今輪查詢範圍，唔改舊購買條件。
+            填本輪待處理消息中表達推薦要求嘅逐字原話，例如「推介包日本漫遊嘅計劃」。沿用今輪查詢範圍，唔改舊購買條件。
 
-            - 只問有冇某類計劃、查單款詳情、其他意圖或地址事件，catalog_recommendation 填空字串。
+            - 填地址或回答澄清後，如果仍在處理同一個推介要求，沿用待處理消息中嘅原話。只問有冇某類計劃、查單款詳情、已轉話題或冇待處理推介要求時，填空字串。
 
 
             ## 本轮办理链接请求
@@ -5801,9 +5818,15 @@ workflow:
                       type: array
                       items: *id001
                       minItems: 1
+                    priority:
+                      type: string
+                      enum:
+                      - required
+                      - preferred
                   required:
                   - text
                   - evidence
+                  - priority
                   additionalProperties: false
                 maxItems: 20
               temporarily_excluded_ids:
@@ -6153,7 +6176,7 @@ workflow:
           , \"\")\n        if not isinstance(catalog_recommendation, str):\n     \
           \       raise ValueError(\"目录推荐请求必须为原话或空文本\")\n        if (turn_intent !=\
           \ \"availability\" or not catalog_recommendation.strip()\n             \
-          \   or not pending or catalog_recommendation not in pending[-1]):\n    \
+          \   or not any(catalog_recommendation in message for message in pending)):\n    \
           \        catalog_recommendation = \"\"\n        conditions = output.get(\"\
           turn_conditions\", [])\n        excluded_ids = output.get(\"temporarily_excluded_ids\"\
           , [])\n        availability_scope = output.get(\"availability_scope\", \"\
@@ -6167,16 +6190,36 @@ workflow:
           \ == \"current_purchase\" and turn_intent != \"availability\"):\n      \
           \      raise ValueError(\"本轮目录查询范围无效\")\n        if excluded_ids and availability_scope\
           \ != \"current_purchase\":\n            raise ValueError(\"只有沿用原选购时才需要逐项临时排除旧条件\"\
-          )\n        turn_requirements = []\n        for index, item in enumerate(conditions,\
-          \ start=1):\n            if (not isinstance(item, dict) or set(item) !=\
-          \ {\"text\", \"evidence\"}\n                    or not isinstance(item[\"\
-          text\"], str) or not item[\"text\"].strip()\n                    or operator_reference(item[\"\
-          text\"])):\n                raise ValueError(\"临时查询条件无效\")\n           \
-          \ verify_evidence(item[\"evidence\"])\n            turn_requirements.append({\"\
-          id\": \"T\" + str(index), \"text\": item[\"text\"],\n                  \
-          \                    \"evidence\": item[\"evidence\"], \"attitude\": \"\
-          interested\",\n                                      \"priority\": \"required\"\
-          })\n        if turn_intent == \"lookup\":\n            if output[\"changes\"\
+          )\n\x20       turn_requirements = []\n\
+          \x20       no_contract_preference = re.compile(\n\
+          \x20           r\"(?:不考[虑慮]|唔考[虑慮])合[约約]期|合[约約]期(?:[无無]所[谓謂]|冇所謂|冇要求|不限|不[限拘])\"\n\
+          \x20       )\n\
+          \x20       for item in conditions:\n\
+          \x20           if (not isinstance(item, dict) or set(item) not in (\n\
+          \x20                   {\"text\", \"evidence\"}, {\"text\", \"evidence\", \"priority\"})\n\
+          \x20                   or not isinstance(item[\"text\"], str) or not item[\"text\"].strip()\n\
+          \x20                   or item.get(\"priority\", \"required\") not in (\"required\", \"preferred\")\n\
+          \x20                   or operator_reference(item[\"text\"])):\n\
+          \x20               raise ValueError(\"临时查询条件无效\")\n\
+          \x20           verify_evidence(item[\"evidence\"])\n\
+          \x20           if all(no_contract_preference.fullmatch(quote.strip(\" ，,。！？!?\"))\n\
+          \x20                  for quote in item[\"evidence\"]):\n\
+          \x20               continue\n\
+          \x20           priority = item.get(\"priority\", \"required\")\n\
+          \x20           text, evidence = item[\"text\"], item[\"evidence\"]\n\
+          \x20           preference = [quote for quote in evidence\n\
+          \x20                         if re.match(r\"^(最好|優先|优先|如果可以|如果得)\", quote.strip())]\n\
+          \x20           business_only = r\"流[动動]通[讯訊](?:[计計][划劃]|plan)?\"\n\
+          \x20           if preference and (len(preference) == len(evidence) or (\n\
+          \x20                   business == \"MS\" and all(\n\
+          \x20                       quote in preference or re.fullmatch(business_only, quote.strip(), re.I)\n\
+          \x20                       for quote in evidence))):\n\
+          \x20               priority = \"preferred\"\n\
+          \x20               if len(preference) != len(evidence):\n\
+          \x20                   text, evidence = \" \".join(preference), preference\n\
+          \x20           turn_requirements.append({\"id\": \"T\" + str(len(turn_requirements) + 1), \"text\": text,\n\
+          \x20                                     \"evidence\": evidence, \"attitude\": \"interested\",\n\
+          \x20                                     \"priority\": priority})\n\        if turn_intent == \"lookup\":\n            if output[\"changes\"\
           ] or output[\"context_update\"] is not None:\n                raise ValueError(\"\
           查询指定计划不得更新选购条件\")\n            if not output[\"question_changes\"] and not\
           \ output[\"clarification\"].strip():\n                raise ValueError(\"\
@@ -6617,7 +6660,7 @@ workflow:
           , \"\")\n        if not isinstance(catalog_recommendation, str):\n     \
           \       raise ValueError(\"目录推荐请求必须为原话或空文本\")\n        if (turn_intent !=\
           \ \"availability\" or not catalog_recommendation.strip()\n             \
-          \   or not pending or catalog_recommendation not in pending[-1]):\n    \
+          \   or not any(catalog_recommendation in message for message in pending)):\n    \
           \        catalog_recommendation = \"\"\n        conditions = output.get(\"\
           turn_conditions\", [])\n        excluded_ids = output.get(\"temporarily_excluded_ids\"\
           , [])\n        availability_scope = output.get(\"availability_scope\", \"\
@@ -6631,16 +6674,36 @@ workflow:
           \ == \"current_purchase\" and turn_intent != \"availability\"):\n      \
           \      raise ValueError(\"本轮目录查询范围无效\")\n        if excluded_ids and availability_scope\
           \ != \"current_purchase\":\n            raise ValueError(\"只有沿用原选购时才需要逐项临时排除旧条件\"\
-          )\n        turn_requirements = []\n        for index, item in enumerate(conditions,\
-          \ start=1):\n            if (not isinstance(item, dict) or set(item) !=\
-          \ {\"text\", \"evidence\"}\n                    or not isinstance(item[\"\
-          text\"], str) or not item[\"text\"].strip()\n                    or operator_reference(item[\"\
-          text\"])):\n                raise ValueError(\"临时查询条件无效\")\n           \
-          \ verify_evidence(item[\"evidence\"])\n            turn_requirements.append({\"\
-          id\": \"T\" + str(index), \"text\": item[\"text\"],\n                  \
-          \                    \"evidence\": item[\"evidence\"], \"attitude\": \"\
-          interested\",\n                                      \"priority\": \"required\"\
-          })\n        if turn_intent == \"lookup\":\n            if output[\"changes\"\
+          )\n\x20       turn_requirements = []\n\
+          \x20       no_contract_preference = re.compile(\n\
+          \x20           r\"(?:不考[虑慮]|唔考[虑慮])合[约約]期|合[约約]期(?:[无無]所[谓謂]|冇所謂|冇要求|不限|不[限拘])\"\n\
+          \x20       )\n\
+          \x20       for item in conditions:\n\
+          \x20           if (not isinstance(item, dict) or set(item) not in (\n\
+          \x20                   {\"text\", \"evidence\"}, {\"text\", \"evidence\", \"priority\"})\n\
+          \x20                   or not isinstance(item[\"text\"], str) or not item[\"text\"].strip()\n\
+          \x20                   or item.get(\"priority\", \"required\") not in (\"required\", \"preferred\")\n\
+          \x20                   or operator_reference(item[\"text\"])):\n\
+          \x20               raise ValueError(\"临时查询条件无效\")\n\
+          \x20           verify_evidence(item[\"evidence\"])\n\
+          \x20           if all(no_contract_preference.fullmatch(quote.strip(\" ，,。！？!?\"))\n\
+          \x20                  for quote in item[\"evidence\"]):\n\
+          \x20               continue\n\
+          \x20           priority = item.get(\"priority\", \"required\")\n\
+          \x20           text, evidence = item[\"text\"], item[\"evidence\"]\n\
+          \x20           preference = [quote for quote in evidence\n\
+          \x20                         if re.match(r\"^(最好|優先|优先|如果可以|如果得)\", quote.strip())]\n\
+          \x20           business_only = r\"流[动動]通[讯訊](?:[计計][划劃]|plan)?\"\n\
+          \x20           if preference and (len(preference) == len(evidence) or (\n\
+          \x20                   business == \"MS\" and all(\n\
+          \x20                       quote in preference or re.fullmatch(business_only, quote.strip(), re.I)\n\
+          \x20                       for quote in evidence))):\n\
+          \x20               priority = \"preferred\"\n\
+          \x20               if len(preference) != len(evidence):\n\
+          \x20                   text, evidence = \" \".join(preference), preference\n\
+          \x20           turn_requirements.append({\"id\": \"T\" + str(len(turn_requirements) + 1), \"text\": text,\n\
+          \x20                                     \"evidence\": evidence, \"attitude\": \"interested\",\n\
+          \x20                                     \"priority\": priority})\n\        if turn_intent == \"lookup\":\n            if output[\"changes\"\
           ] or output[\"context_update\"] is not None:\n                raise ValueError(\"\
           查询指定计划不得更新选购条件\")\n            if not output[\"question_changes\"] and not\
           \ output[\"clarification\"].strip():\n                raise ValueError(\"\
@@ -7467,6 +7530,8 @@ workflow:
 
             ## 本轮回复动作
             - shop按当前选购条件，availability按本轮查询范围，从全部可售标签中挑0至5款。结合本轮原话、有效条件、上下文及每款tag判断相关性，按核对价值排序；标签与硬条件明确冲突就排除。标签有具体相关线索但条款待核实时可以入选。只选值得读原文的计划，有几款选几款，不凑数，无合理候选返回[]。
+            - 月费目标价按与目标的差距排序；明确的预算上限按是否超出筛选。客户没有合约期偏好时，有合约和无合约都可入选。
+            - 对“最好流量高”这类无数值门槛的偏好，按目录中实际规格选择有比较价值的套餐。
             - lookup只定位客户所指的当前可售计划，明确对象选一款，两个合理指代最多选两款。确需客户辨别时用clarify；所指计划已不可售或无可核对对象时用recommend和空列表。禁止顺带挑其他计划。
             - 三种意图都只读取selected_plan_codes内的原文。空列表结束查询；原文不支持本轮条件时也不自动补查其他计划。
             - 相关问答尽量先答重点。追问每轮只问一个会改变选择的问题，不因轮数到了就推不符合的计划。
@@ -9453,7 +9518,43 @@ workflow:
           n- 优惠月费: WeTV 月費計劃 : 第1至12個月月費: $48 (每月回贈$13)\\n- 合约期: 12個月合約\\n\\n### 功能信息条目\
           \ 1\\n- 支援2部設備同時觀看:和好友一起使用VIP，支援個人電腦、手機、平板電腦、智慧電視等多種連網裝置\\n- 高清1080P畫質:大量超高畫質視訊資源，採用先進程式設計技術，畫面更細緻，觀影過程更加身臨其境\\\
           n- 極速下載影片:會員獨享快取提速線路，比非會員快（最高快取速度取決於您的寬頻，寬頻越高加的越多）\\n- 免前置廣告:享受無干擾的完整觀影體驗\\\
-          n- 支援2部設備同時觀看\\n- 高清1080P畫質\\n- 極速下載影片\\n'}}\n\ndef plan_monthly_fee(markdown):\n\
+          n- 支援2部設備同時觀看\\n- 高清1080P畫質\\n- 極速下載影片\\n'}}\n\ndef plan_facts(business, markdown):\n\
+          \x20   lines = markdown.splitlines()\n\
+          \x20   facts = {}\n\
+          \x20   renewal = [line.removeprefix(\"- \") for line in lines\n\
+          \x20              if re.match(r\"^- 合[约約]期[：:]\", line) and re.search(r\"自[动動][续續][约約]\", line)]\n\
+          \x20   admin_fee = [line.removeprefix(\"- \") for line in lines\n\
+          \x20                if line.startswith(\"- \") and re.search(r\"行政[费費]\", line) and \"$\" in line]\n\
+          \x20   if renewal or admin_fee:\n\
+          \x20       amounts = {amount for line in admin_fee for amount in re.findall(r\"\\$\\s*(\\d+(?:\\.\\d+)?)\", line)}\n\
+          \x20       facts[\"booking_terms\"] = {\"renewal\": renewal, \"admin_fee\": admin_fee,\n\
+          \x20                                 \"admin_fee_amounts_differ\": len(amounts) > 1}\n\
+          \x20   if business == \"BN\":\n\
+          \x20       name = re.search(r\"^方案名[称稱][：:][ \\t]*([^\\n]+)\", markdown, re.M)\n\
+          \x20       name = name.group(1) if name else \"\"\n\
+          \x20       router = r\"(?:路由器|\\brouter\\b)\"\n\
+          \x20       if re.search(r\"(?:需|須|必須|必须)\\s*(?:加購|加购|另購|另购).*\" + router, name, re.I):\n\
+          \x20           offer = \"required_add_on\"\n\
+          \x20       elif re.search(r\"(?:可選購|可选购|可加購|可加购).*\" + router, name, re.I):\n\
+          \x20           offer = \"optional\"\n\
+          \x20       elif re.search(r\"(?:連|连|附送|包括|包含).*\" + router, name, re.I):\n\
+          \x20           offer = \"included\"\n\
+          \x20       else:\n\
+          \x20           offer = \"unconfirmed\"\n\
+          \x20       facts[\"router_offer\"] = offer\n\
+          \x20   if business == \"MS\":\n\
+          \x20       speeds = set()\n\
+          \x20       for line in lines:\n\
+          \x20           if re.match(r\"^\\s*-?\\s*(?:流量[后後][续續]安排[：:]|其[后後]|超[過过]首)\", line):\n\
+          \x20               speeds.update(float(value) for value in re.findall(r\"([0-9]+(?:\\.[0-9]+)?)\\s*Mbps(?![A-Za-z])\", line, re.I))\n\
+          \x20       if speeds:\n\
+          \x20           facts[\"after_data_limit\"] = {\n\
+          \x20               \"speeds_mbps\": [format(speed, \"g\") for speed in sorted(speeds)],\n\
+          \x20               \"conflict\": len(speeds) > 1,\n\
+          \x20           }\n\
+          \x20   return facts\n\
+          \n\
+          \ndef plan_monthly_fee(markdown):\n\
           \x20   section = re.search(r\"^###[ ]+基础信息[ ]*$\\n(.*?)(?=^#{1,6}[ ]|\\Z)\", markdown, re.M | re.S)\n\
           \x20   if section:\n\
           \x20       price = re.search(r\"^套餐参考月费[：:][ ]*([0-9]+(?:\\.[0-9]+)?)[ ]*$\", section.group(1), re.M)\n\
@@ -9466,7 +9567,8 @@ workflow:
           \  for code in selected_plan_codes:\n        if code not in DETAILS[business]:\n\
           \            raise ValueError(\"后端未找到候选套餐详情\")\n        markdown = DETAILS[business][code]\n\
           \x20       candidates.append({**plans_by_code[code], \"markdown\": markdown,\n\
-          \x20                          \"plan_monthly_fee\": plan_monthly_fee(markdown)})\n    return candidates\n\ndef\
+          \x20                          \"plan_monthly_fee\": plan_monthly_fee(markdown),\n\
+          \x20                          **plan_facts(business, sales_document(markdown))})\n    return candidates\n\ndef\
           \ main(bundle, plans_tags, llm_output):\n    snapshot, business = bundle[\"\
           snapshot\"], bundle[\"business\"]\n    prefix = business.lower()\n    needs\
           \ = snapshot[prefix + \"_needs\"]\n    current = sales_needs(needs)\n\
@@ -9750,6 +9852,10 @@ workflow:
             - lookup只核对用户所指计划的资料问题，缺资料的答案标unknown。若有两个合理指代，必须一起核对才能答，不能只取其中一个；无可核对结果时返回空数组。不要用其他计划替换被问对象。
             - 用户想要 Disney+ 时，原文明确可选 Disney+ 的二选一组合可以满足选择该服务的需求。说明需要选 Disney+、适用档位和期数；若用户明确要求两项同时包含，按原文核对。核对优惠时，组合已包含或可选的权益与额外减价分别判断。
             - 预算上限、计划月费和价格比较一律用plan_monthly_fee核对，即当前原文「基础信息」中的「套餐参考月费」。有结论时引用该字段原文；缺少整套月费则标记unknown。不使用单项服务「优惠月费」回答月费问题，也不重新加总或扣减回赠。客户询问单项服务月费时，不把整套月费当作该服务月费；只提供整套套餐参考月费，并说明不提供单项服务月费。
+            - 月费评估的解释和理由也只使用套餐参考月费。对目标价说明实际差距，不因为低于目标价就判定接近。回赠、预缴和必要另收费用按原文单独判断。
+            - 只有preferred且方向明确时，可选原文规格符合该方向的套餐，列出实际数值。“最好流量高”用可核对的流量排序，未给门槛不构成淘汰理由。
+            - 核对路由器等设备和权益时，只有该款原文明确列明附送才支持附送。若条款写明随套餐提供、可选、须另购或有预缴，保留对应条件。规格、功能或泛称有其他设备方案可选，对该款是否附送只能标为 unknown。
+            - 使用 router_offer 判断套餐是否随附、须另购、可选或尚未确认。included 仅表示随套餐提供，费用仍须核对。after_data_limit 标记冲突时，说明资料有不同数值，不能从中选一个作确定承诺。
 
             ## 前端链接短文案
             - 每款 assessment 嘅 link_label 可填「查看 1000M 方案」呢類短文案，格式係「查看」加空格再加該款原文已有嘅簡短規格或名稱，可加「方案」或「計劃」。最多24字，兩款盡量用容易分辨嘅特色。唔好寫網址、優惠承諾、營運商品牌或資料冇列明嘅規格。冇合適短名就填空字串。
@@ -10108,7 +10214,12 @@ workflow:
           \        requirements = {item[\"id\"] for item in needs[\"requirements\"\
           ]}\n        required_ids = {item[\"id\"] for item in needs[\"requirements\"\
           ]\n                        if item.get(\"priority\") == \"required\"}\n\
-          \        eligible = []\n        questions = {item[\"id\"] for item in needs.get(\"\
+          \x20       router_inclusion_requests = {\n\
+          \x20           item[\"id\"] for item in needs[\"requirements\"]\n\
+          \x20           if item.get(\"attitude\", \"interested\") == \"interested\"\n\
+          \x20           and re.match(r\"^(?:套餐|[計计][劃划])?\\s*(?:需要|要求|要)?\\s*(?:包含|包括|包埋|連|连)\\s*(?:路由器|router\\b)\", item.get(\"text\", \"\"), re.I)\n\
+          \x20       }\n\
+          \x20       eligible = []\n        questions = {item[\"id\"] for item in needs.get(\"\
           questions\", [])}\n        assessed = {}\n        answered = {}\n      \
           \  labels = {}\n        for assessment in output[\"assessments\"]:\n   \
           \         if (not isinstance(assessment, dict) or not {\"plan_code\", \"\
@@ -10140,8 +10251,12 @@ workflow:
           \ by_code[code][\"markdown\"])\n                seen.add(identifier)\n \
           \           if seen != requirements:\n                raise ValueError(\"\
           套餐\" + code + \"缺少需求编号=\" + dump(sorted(requirements - seen))\n        \
-          \                         + \"；精选套餐必须覆盖每条当前有效需求，缺失信息标记unknown\")\n     \
-          \       assessed[code] = assessment[\"requirements\"]\n            info_answers\
+          \                         + \"；精选套餐必须覆盖每条当前有效需求，缺失信息标记unknown\")\n\x20           offer = by_code[code].get(\"router_offer\")\n\
+          \x20           if offer in (\"unconfirmed\", \"optional\", \"required_add_on\"):\n\
+          \x20               for item in assessment[\"requirements\"]:\n\
+          \x20                   if item[\"requirement_id\"] in router_inclusion_requests and item[\"status\"] == \"supported\":\n\
+          \x20                       item.update(status=\"unknown\", quote=\"\", explanation=\"原文未确认路由器随该套餐提供。\")\n\
+          \x20           assessed[code] = assessment[\"requirements\"]\n            info_answers\
           \ = assessment.get(\"info_answers\", [])\n            if not isinstance(info_answers,\
           \ list):\n                raise ValueError(\"套餐咨询回答必须为列表\")\n          \
           \  seen_questions = set()\n            for item in info_answers:\n     \
@@ -10511,7 +10626,12 @@ workflow:
           \        requirements = {item[\"id\"] for item in needs[\"requirements\"\
           ]}\n        required_ids = {item[\"id\"] for item in needs[\"requirements\"\
           ]\n                        if item.get(\"priority\") == \"required\"}\n\
-          \        eligible = []\n        questions = {item[\"id\"] for item in needs.get(\"\
+          \x20       router_inclusion_requests = {\n\
+          \x20           item[\"id\"] for item in needs[\"requirements\"]\n\
+          \x20           if item.get(\"attitude\", \"interested\") == \"interested\"\n\
+          \x20           and re.match(r\"^(?:套餐|[計计][劃划])?\\s*(?:需要|要求|要)?\\s*(?:包含|包括|包埋|連|连)\\s*(?:路由器|router\\b)\", item.get(\"text\", \"\"), re.I)\n\
+          \x20       }\n\
+          \x20       eligible = []\n        questions = {item[\"id\"] for item in needs.get(\"\
           questions\", [])}\n        assessed = {}\n        answered = {}\n      \
           \  labels = {}\n        for assessment in output[\"assessments\"]:\n   \
           \         if (not isinstance(assessment, dict) or not {\"plan_code\", \"\
@@ -10543,8 +10663,12 @@ workflow:
           \ by_code[code][\"markdown\"])\n                seen.add(identifier)\n \
           \           if seen != requirements:\n                raise ValueError(\"\
           套餐\" + code + \"缺少需求编号=\" + dump(sorted(requirements - seen))\n        \
-          \                         + \"；精选套餐必须覆盖每条当前有效需求，缺失信息标记unknown\")\n     \
-          \       assessed[code] = assessment[\"requirements\"]\n            info_answers\
+          \                         + \"；精选套餐必须覆盖每条当前有效需求，缺失信息标记unknown\")\n\x20           offer = by_code[code].get(\"router_offer\")\n\
+          \x20           if offer in (\"unconfirmed\", \"optional\", \"required_add_on\"):\n\
+          \x20               for item in assessment[\"requirements\"]:\n\
+          \x20                   if item[\"requirement_id\"] in router_inclusion_requests and item[\"status\"] == \"supported\":\n\
+          \x20                       item.update(status=\"unknown\", quote=\"\", explanation=\"原文未确认路由器随该套餐提供。\")\n\
+          \x20           assessed[code] = assessment[\"requirements\"]\n            info_answers\
           \ = assessment.get(\"info_answers\", [])\n            if not isinstance(info_answers,\
           \ list):\n                raise ValueError(\"套餐咨询回答必须为列表\")\n          \
           \  seen_questions = set()\n            for item in info_answers:\n     \
@@ -10807,8 +10931,7 @@ workflow:
           \ interview_topic=\"\"):\n    return {\n        \"snapshot\": snapshot,\
           \ \"business\": business, \"mode\": mode,\n        \"instruction\": instruction,\
           \ \"selected_plans\": selected_plans or [],\n        \"persist_reply\":\
-          \ persist_reply, \"interview_topic\": interview_topic\n    }\n\ndef main(bundle,\
-          \ recommendations_json, selection_error, rank_error):\n    bundle = clone(bundle)\n\
+          \ persist_reply, \"interview_topic\": interview_topic\n    }\n\ndef main(bundle, recommendations_json, selection_error, rank_error, candidates_json=\"[]\"):\n    bundle = clone(bundle)\n\
           \    if rank_error or selection_error:\n        bundle.update(mode=\"error\"\
           , instruction=rank_error or selection_error, selected_plans=[])\n    else:\n        plans = json.loads(recommendations_json)\n\
           \x20       bundle[\"selected_plans\"] = plans\n\
@@ -10817,6 +10940,12 @@ workflow:
           \x20           bundle.update(mode=\"lookup_unavailable\", instruction=\"而家未能核實你問嗰款計劃。\")\n\
           \x20       elif mode in (\"recommend\", \"availability\") and not plans:\n\
           \x20           bundle.update(mode=\"no_match\", instruction=\"\")\n\
+          \x20           needs = bundle[\"snapshot\"][bundle[\"business\"].lower() + \"_needs\"]\n\
+          \x20           if needs[\"questions\"]:\n\
+          \x20               bundle[\"consultation_plans\"] = [\n\
+          \x20                   {\"plan_code\": plan[\"plan_code\"], \"markdown\": plan[\"markdown\"]}\n\
+          \x20                   for plan in json.loads(candidates_json)\n\
+          \x20               ]\n\
           \    return {\"bundle\": bundle}\n"
         code_language: python3
         outputs:
@@ -10847,6 +10976,11 @@ workflow:
           - error
           value_type: string
           variable: rank_error
+        - value_selector:
+          - rank
+          - sales_candidates_json
+          value_type: string
+          variable: candidates_json
       height: 52
       id: recommendation
       position:
@@ -11148,8 +11282,10 @@ workflow:
           , \"no_match\", \"lookup_unavailable\"):\n        excluded_ids = set(bundle.get(\"\
           temporarily_excluded_ids\", []))\n        saved = needs[\"requirements\"\
           ]\n        current = [item for item in saved if item[\"id\"] not in excluded_ids]\n\
-          \        needs = {\"requirements\": current + bundle.get(\"turn_requirements\"\
-          , [])}\n        if bundle[\"mode\"] == \"availability\" and bundle.get(\"\
+          \x20       needs = {\"requirements\": current + bundle.get(\"turn_requirements\", []),\n\
+          \x20                \"questions\": needs[\"questions\"]}\n\
+          \x20       if bundle[\"mode\"] == \"no_match\" and needs[\"questions\"]:\n\
+          \x20           needs[\"consultation_plans\"] = bundle.get(\"consultation_plans\", [])\n\n        if bundle[\"mode\"] == \"availability\" and bundle.get(\"\
           availability_scope\") == \"catalog\":\n            needs[\"previous_purchase_requirements\"\
           ] = saved\n    if bundle[\"mode\"] == \"error\":\n        needs[\"last_reply\"\
           ] = \"\"\n        needs[\"last_recommended_codes\"] = []\n    instruction\
@@ -11157,13 +11293,13 @@ workflow:
           instruction\"]) else bundle[\"instruction\"]\n    if operator_reference(message):\n\
           \        instruction += \" 用户涉及运营商话题；不复述名称、不作评价或比较，只依据给定套餐的流量、费用、合约和服务内容提供销售建议。\"\
           \n    link_request = bundle.get(\"link_request\", \"\")\n    link_requested\
-          \ = bool(link_request and link_request in message)\n    catalog_request\
-          \ = bundle.get(\"catalog_recommendation\", \"\")\n    catalog_requested\
-          \ = bool(catalog_request and catalog_request in message)\n    if bundle[\"\
+          \ = bool(link_request and link_request in message)\n\x20   catalog_requested = bool(bundle.get(\"catalog_recommendation\"))\n    if bundle[\"\
           mode\"] == \"lookup\" and link_requested:\n        if len(bundle[\"selected_plans\"\
           ]) == 1:\n            instruction += \"\\n客戶想要指定計劃嘅辦理連結，請自然回應。純索取連結時唔需要報讀原文有冇列網址；其他事實問題照常核實。\"\
           \n        else:\n            instruction += \"\\n有多個可能指代，只問客戶想要邊款計劃嘅辦理連結。\"\
-          \n    if bundle[\"mode\"] == \"recommend\":\n        two_plans = len(bundle[\"\
+          \n\x20   if bundle[\"mode\"] == \"recommend\" or (bundle[\"mode\"] == \"availability\" and catalog_requested):\n\
+          \x20       instruction += \"\\n按推薦版式展示本輪精選。可以用「今次揀咗」帶出計劃，唔將本輪精選數目說成可售總數。\"\n\
+          \x20       two_plans = len(bundle[\"\
           selected_plans\"]) == 2\n        heading_number = \"序號. \" if two_plans\
           \ else \"\"\n        if two_plans:\n            instruction += \"\\n兩款預設簡短分段。客戶要求用表格，或者至少有兩項會影響選擇嘅差異可以簡短並排比較，先考慮用表格。\"\
           \n        instruction += (\n            \"\\n只用一種版式。分段時，每款計劃單獨成節。\"\n  \
@@ -11439,9 +11575,17 @@ workflow:
 
             ## 像香港電訊顧問咁答
             - 每輪只講有助揀計劃嘅重點；先答客戶最想知嘅嘢，唔重播之前講過嘅內容，唔順手展開無關建議。
+            - clarify 要保留 instruction 入面需要客戶選擇嘅所有選項，唔好改成只確認其中一項。客戶話合約期唔影響揀計劃，就按冇合約期偏好理解。
             - 所有月費回答只列整套「計劃參考月費」，一律用plan_monthly_fee（原文「基礎信息」嘅「套餐參考月費」）。缺少呢個值時省略金額。客戶問單項服務月費時，說明只提供整套計劃參考月費，唔將整套月費當成單項服務月費，亦唔列單項「優惠月費」。必要另收費用照常列明，唔自行加總月費或再扣回贈。
-            - no_match：用一句自然嘅香港粵語直接答冇。優先講客戶今輪問嘅計劃、規格或組合；如果結果受預算或者地址範圍限制，就喺同一句講清楚。按客戶嘅問法組句，唔用固定開場或固定句式。答完就停，唔講資料未注明，唔推舊計劃或替代，亦唔追問。
-            - availability：直接答有冇；有可以順帶講相關計劃嘅規格同整套參考月費，唔寫完整推介。提到某款時附上原有計劃編號，方便下一輪接住查。previous_purchase_requirements只可以用嚟提示與上一輪嘅明顯分別，例如今輪搵到嘅計劃超出舊預算，唔可以用佢判斷今輪有冇。客戶明確要求沿用原條件時，回覆講清楚查詢範圍。
+            - 「月費及合約」用「計劃參考月費 $金額」報價。原文或評估提到單項服務某個月收幾多，只用嚟理解條款，唔並列成另一個月費，亦唔用單項收費期推斷整套計劃之後嘅月費。回贈、預繳、必要另收費用同自動續約按已核實條款交代。
+            - 推介每款計劃時，月費及合約先交代原文列明嘅續約、行政費同必要收費，再講延遲生效等可選特色。booking_terms 有續約或行政費資料就要保留；行政費列有唔同金額，交代適用條件同金額待確認，唔自行揀其中一個，亦唔計入參考月費。
+            - 「無合約期限制」只係合約期資料。取消、退款同續約各自按原文核實，未有相關條款就唔承諾可以隨時取消。
+            - 同一款計劃嘅設備或權益前後用同一個結論，清楚交代係隨計劃附送、可選、另購定資料未列明。原文只提及設備規格或通用選項，就唔用「包」或「送」。結尾只總結已交代嘅取捨，唔新增或反轉結論。
+            - router_offer 係每款嘅路由器狀態。included 只表示隨計劃提供，required_add_on 表示須另購，optional 表示可選，unconfirmed 表示資料未確認。推介流量時，列埋用完後嘅限制。after_data_limit.conflict 為 true 就說明資料有出入，唔承諾其中一個速度。
+            - 本輪業務按 business 表述。客戶問一齊登記同優惠，要分別答能否組合及回贈適用條件。指定寬頻先有嘅回贈，唔當成流動通訊本身嘅優惠。
+            - 轉述權益時，保留直接限定範圍嘅字眼，例如「部分節目」「首六個月」「指定計劃」同適用資格。
+            - no_match：用一句自然嘅香港粵語講今次未搵到同時符合客戶條件嘅計劃，保留條件嘅組合，唔推斷全目錄情況。如果 questions 有其他明確問題，再用 consultation_plans 嘅本輪原文簡短逐項答；無依據就講暫未核實。呢啲資料只用嚟答問題，唔當作符合條件嘅推介或辦理入口。
+            - availability：直接答有冇，簡短講已核實嘅規格同整套參考月費。instruction 要求按推薦版式時照版式展示。提到某款時附上原有計劃編號，方便下一輪接住查。previous_purchase_requirements 只供說明同上輪嘅明顯分別。客戶明確要求沿用原條件時，回覆講清楚查詢範圍。
             - 問登記優惠時，先交代已核實可揀嘅服務同整套參考月費。額外優惠未能核實，就只講未能確認有額外優惠，唔反過來否定已核實嘅計劃或權益。二選一要講清楚係可選其中一項。
             - lookup：只答客戶問到嘅已核實事實。如果「嗰款」有兩個合理指代，兩款答案一致就直接答；答案不同或未能一併核實，就只問客戶指邊一款。lookup_unavailable跟instruction簡短回覆，唔補推其他計劃。
             - boundary：無關問題只需一句帶返到揀電訊計劃。consult只答有助選擇嘅部分，通常一兩句足夠。

@@ -49,7 +49,10 @@ MODEL_SCHEMAS = {
         "link_request": TEXT,
         "catalog_recommendation": TEXT,
         "availability_scope": enum_schema("catalog", "current_purchase"),
-        "turn_conditions": array_schema(object_schema({"text": TEXT, "evidence": EVIDENCE}), 20),
+        "turn_conditions": array_schema(object_schema({
+            "text": TEXT, "evidence": EVIDENCE,
+            "priority": enum_schema("required", "preferred"),
+        }), 20),
         "temporarily_excluded_ids": array_schema(TEXT, 100),
         "purchase_switch": {"anyOf": [
             {"type": "null"}, object_schema({"target": TEXT, "evidence": EVIDENCE}),
