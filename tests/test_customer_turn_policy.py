@@ -2,6 +2,7 @@ import copy
 import json
 from pathlib import Path
 import unittest
+from unittest.mock import patch
 
 import yaml
 
@@ -91,7 +92,7 @@ class CustomerTurnPolicyTests(unittest.TestCase):
         snapshot["bn_needs"]["ready_to_recommend"] = True
         bundle["mode"] = "availability"
         plans = self.run_node["fetch_tags"]("BN", snapshot)["bundle"]["plans_tags"]
-        ranked = self.run_node["rank"](bundle, plans, json.dumps({"selected_plan_codes": [], "reason": "查家居電話"}))
+        ranked = self.run_node["rank"](bundle, plans, json.dumps({"selected_plan_codes": codes, "reason": "查家居電話"}))
         self.assertEqual(ranked["error"], "")
         self.assertEqual([item["id"] for item in json.loads(ranked["request_json"])["requirements"]], ["T1"])
         checked = self.run_node["validate_selection"](
@@ -181,30 +182,89 @@ class CustomerTurnPolicyTests(unittest.TestCase):
         self.assertEqual(needs["last_reply"], "你每月大概用幾多GB？")
         self.assertTrue(needs["interview_pending"])
 
-    def test_search_reads_full_sellable_scope_but_lookup_reads_only_target(self):
-        tags_result = self.run_node["fetch_tags"]("MS", self.snapshot)
-        plans = tags_result["bundle"]["plans_tags"]
-        self.snapshot["ms_needs"]["ready_to_recommend"] = True
+    def mobile_catalog(self, intent):
+        plans = self.run_node["fetch_tags"]("MS", self.snapshot)["bundle"]["plans_tags"]
         self.snapshot["ms_catalog_status"] = "ready"
-        first = plans[0]["plan_code"]
-        shortlist = json.dumps({"selected_plan_codes": [first], "reason": "優先核對"})
-        for mode, expected in (
-            ("recommend", [plan["plan_code"] for plan in plans]),
-            ("availability", [plan["plan_code"] for plan in plans]),
-            ("lookup", [first]),
-        ):
-            with self.subTest(mode=mode):
-                result = self.run_node["rank"]({"snapshot": self.snapshot, "business": "MS", "mode": mode}, plans, shortlist)
+        self.snapshot["ms_needs"]["user_context"] = "想搵手機上台計劃"
+        bundle = {"snapshot": self.snapshot, "business": "MS", "instruction": "", "turn_intent": intent}
+        return bundle, plans, [plan["plan_code"] for plan in plans]
+
+    def shortlist(self, bundle, plans, codes):
+        choice = {"action": "recommend", "selected_plan_codes": codes, "follow_up": None, "reason": "按標籤核對"}
+        validated = self.run_node["shortlist_validation"](bundle, plans, choice)
+        self.assertFalse(validated["retry"], validated["error"])
+        return self.run_node["product_decision"](bundle, plans, validated["text"])
+
+    def test_only_shortlisted_documents_reach_selection_in_shortlist_order(self):
+        for intent, mode, count in (("shop", "recommend", 5), ("availability", "availability", 5), ("lookup", "lookup", 1)):
+            with self.subTest(intent=intent):
+                bundle, plans, codes = self.mobile_catalog(intent)
+                self.assertGreater(len(codes), 5)
+                selected = list(reversed(codes))[:count]
+                decision = self.shortlist(bundle, plans, selected)
+                self.assertEqual(decision["bundle"]["mode"], mode)
+                rank = self.run_node["rank"]
+                # 未入选套餐在标签目录中可售，但详情服务只有本轮请求的原文。
+                details = rank.__globals__["DETAILS"]["MS"]
+                with patch.dict(details, {code: details[code] for code in selected}, clear=True):
+                    result = rank(decision["bundle"], plans, decision["shortlist_json"])
                 self.assertEqual(result["error"], "")
-                self.assertEqual([item["plan_code"] for item in json.loads(result["candidates_json"])], expected)
+                documents = json.loads(result["candidates_json"])
+                self.assertEqual([plan["plan_code"] for plan in documents], selected)
+                for plan in documents:
+                    source = WORKFLOW.parents[1] / "data" / "new_data" / (plan["plan_code"] + "-cn")
+                    self.assertEqual(plan["markdown"], source.read_text(encoding="utf-8"))
+                sales = json.loads(result["sales_candidates_json"])
+                self.assertEqual([plan["plan_code"] for plan in sales], selected)
+
+    def test_empty_shortlist_bypasses_details_and_selection(self):
+        detail_modes = {item["value"] for item in self.nodes["recommend_route"]["cases"][0]["conditions"]}
+        for intent, mode in (("shop", "no_match"), ("availability", "no_match"), ("lookup", "lookup_unavailable")):
+            with self.subTest(intent=intent):
+                bundle, plans, _ = self.mobile_catalog(intent)
+                decision = self.shortlist(bundle, plans, [])
+                self.assertEqual(decision["bundle"]["mode"], mode)
+                self.assertNotIn(mode, detail_modes)
+                self.assertEqual(decision["bundle"].get("selected_plans", []), [])
+
+    def test_shortlist_rejects_excess_duplicate_and_out_of_scope_codes(self):
+        bundle, plans, codes = self.mobile_catalog("availability")
+        for invalid in (codes[:6], [codes[0], codes[0]], [codes[0], "UNKNOWN"]):
+            with self.subTest(invalid=invalid):
+                choice = {"action": "recommend", "selected_plan_codes": invalid, "follow_up": None, "reason": "核對"}
+                self.assertTrue(self.run_node["shortlist_validation"](bundle, plans, choice)["retry"])
+                decision = self.run_node["product_decision"](bundle, plans, json.dumps(choice))
+                self.assertEqual(decision["bundle"]["mode"], "error")
+                self.assertEqual(json.loads(decision["shortlist_json"])["selected_plan_codes"], [])
+
+    def test_selection_accepts_zero_to_two_and_rejects_codes_outside_shortlist(self):
+        bundle, plans, codes = self.mobile_catalog("shop")
+        decision = self.shortlist(bundle, plans, codes[:5])
+        ranked = self.run_node["rank"](decision["bundle"], plans, decision["shortlist_json"])
+        self.assertEqual(ranked["error"], "")
+        candidates = ranked["sales_candidates_json"]
+        needs = self.run_node["decision_state"](decision["bundle"])["needs_json"]
+        for selected, valid in (([], True), (codes[1:2], True), ([codes[4], codes[1]], True),
+                                (codes[:3], False), ([codes[0], codes[0]], False), ([codes[0], codes[5]], False)):
+            with self.subTest(selected=selected):
+                output = {"reason": "按原文核對", "assessments": [
+                    {"plan_code": code, "requirements": [], "info_answers": []} for code in selected
+                ]}
+                validated = self.run_node["select_validation"](output, candidates, needs)
+                self.assertEqual(validated["retry"], not valid, validated["error"])
+                result = self.run_node["validate_selection"](validated["text"], candidates, needs)
+                self.assertEqual(bool(result["error"]), not valid, result["error"])
+                self.assertEqual([p["plan_code"] for p in json.loads(result["recommendations_json"])],
+                                 selected if valid else [])
 
     def test_available_query_flows_through_details_without_entering_recommendation_mode(self):
-        message = "有冇包日本漫遊嘅？"
+        message = "有冇包每月3GB中國內地及澳門數據嘅？"
         bundle = self.merge(message, turn_intent="availability",
-                            turn_conditions=[{"text": "包含日本漫遊", "evidence": [message]}])
+                            turn_conditions=[{"text": "每月3GB中國內地及澳門數據", "evidence": [message]}])
         plans = self.run_node["fetch_tags"]("MS", self.snapshot)["bundle"]["plans_tags"]
         bundle["snapshot"]["ms_catalog_status"] = "ready"
-        choice = {"action": "recommend", "selected_plan_codes": [], "follow_up": None, "reason": "查有冇"}
+        code = plans[0]["plan_code"]
+        choice = {"action": "recommend", "selected_plan_codes": [code], "follow_up": None, "reason": "查有冇"}
         validated = self.run_node["shortlist_validation"](bundle, plans, choice)
         self.assertFalse(validated["retry"], validated["error"])
         decision = self.run_node["product_decision"](bundle, plans, validated["text"])
@@ -212,18 +272,20 @@ class CustomerTurnPolicyTests(unittest.TestCase):
         review = self.nodes["recommend_route"]["cases"][0]
         self.assertEqual(review["logical_operator"], "or")
         self.assertIn("availability", [item["value"] for item in review["conditions"]])
-        candidates = [{"plan_code": "MATCH", "markdown": "包括日本漫遊"}]
+        ranked = self.run_node["rank"](decision["bundle"], plans, decision["shortlist_json"])
+        self.assertEqual(ranked["error"], "")
         output = {"reason": "有符合條件", "assessments": [{
-            "plan_code": "MATCH", "info_answers": [],
+            "plan_code": code, "info_answers": [],
             "requirements": [{
-                "requirement_id": "T1", "status": "supported", "quote": "包括日本漫遊", "explanation": "符合",
+                "requirement_id": "T1", "status": "supported", "quote": "每月3GB中國內地及澳門數據", "explanation": "符合",
             }],
         }]}
         needs_json = self.run_node["decision_state"](bundle)["needs_json"]
-        result = self.run_node["validate_selection"](json.dumps(output), json.dumps(candidates), needs_json)
+        result = self.run_node["validate_selection"](json.dumps(output), ranked["sales_candidates_json"], needs_json)
+        self.assertEqual(result["error"], "")
         reply = self.run_node["recommendation"](decision["bundle"], result["recommendations_json"], "", "")["bundle"]
         self.assertEqual(reply["mode"], "availability")
-        self.assertEqual([plan["plan_code"] for plan in reply["selected_plans"]], ["MATCH"])
+        self.assertEqual([plan["plan_code"] for plan in reply["selected_plans"]], [code])
         self.assertEqual(reply["snapshot"]["ms_needs"]["requirements"], [])
 
     def test_explicit_catalog_recommendation_gets_links_without_changing_saved_conditions(self):

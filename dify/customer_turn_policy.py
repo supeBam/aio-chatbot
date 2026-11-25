@@ -233,13 +233,13 @@ def apply_customer_turn_policy(nodes):
         "- 查询不自动成为", "- priority=required尊重", "- 确无合理改善",
         "- 不擅自把相对偏好", "- 首次需求示例", "- 用户目标规格无精确",
         "- 用户未声明不可超出", "- 不要求直接选择最快", "- 提取阶段的待澄清信息非空",
-        "- 最多3次可选访谈", "- selected_plan_codes在追问时也保留",
+        "- 初筛以避免遗漏为目标", "- 最多3次可选访谈", "- selected_plan_codes在追问时也保留",
     )
     item["text"] = "\n".join(line for line in item["text"].splitlines() if not line.startswith(obsolete))
     item["text"] = replace(
         item["text"],
         '{"action":"recommend","selected_plan_codes":["DEMO_BN_1000"],"follow_up":null,"reason":"本轮可售目录没有比上轮1000M更快的候选，仅保留未改善备选，必须披露带宽没有提升"}',
-        '{"action":"recommend","selected_plan_codes":[],"follow_up":null,"reason":"目录未发现更高速计划，继续原文核对，不把旧计划作为替代推荐"}',
+        '{"action":"recommend","selected_plan_codes":[],"follow_up":null,"reason":"唯一标签显示与上次同速，没有值得核对的候选"}',
     )
     item["text"] = replace(
         item["text"],
@@ -249,12 +249,13 @@ def apply_customer_turn_policy(nodes):
     item["text"] = replace(
         item["text"],
         '{"action":"recommend","selected_plan_codes":["DEMO_BN_2000"],"follow_up":null,"reason":"2000M相对上轮1000M有提升，但378元超出80元预算；保留作有缺口的比较，不能因98元较便宜就只返回1000M并称其更快"}',
-        '{"action":"recommend","selected_plan_codes":[],"follow_up":null,"reason":"标签中没有同时更快且符合预算的计划，继续核对当前可售原文"}',
+        '{"action":"recommend","selected_plan_codes":[],"follow_up":null,"reason":"两个标签均与明确的预算上限冲突，初筛为空"}',
     )
     add_policy("shortlist", """
 ## 本轮回复动作
-- needs_json.turn_intent=lookup时，只定位用户问的计划，用recommend进入事实核对，selected_plan_codes只放明确指代或至多两个合理的当前可售对象。两个对象的结论一样就直接答；不能定位可核对的对象时才clarify。禁止顺带挑其他计划。
-- availability用recommend进入全目录核对，此轮只回答是否有相符计划。shop只有能帮助当前选购时才用recommend。除lookup外，编号列表只是优先核对顺序；空列表仍会检查当前可售原文。
+- shop按当前选购条件，availability按本轮查询范围，从全部可售标签中挑0至5款。结合本轮原话、有效条件、上下文及每款tag判断相关性，按核对价值排序；标签与硬条件明确冲突就排除。标签有具体相关线索但条款待核实时可以入选。只选值得读原文的计划，有几款选几款，不凑数，无合理候选返回[]。
+- lookup只定位客户所指的当前可售计划，明确对象选一款，两个合理指代最多选两款。确需客户辨别时用clarify；所指计划已不可售或无可核对对象时用recommend和空列表。禁止顺带挑其他计划。
+- 三种意图都只读取selected_plan_codes内的原文。空列表结束查询；原文不支持本轮条件时也不自动补查其他计划。
 - 相关问答尽量先答重点。追问每轮只问一个会改变选择的问题，不因轮数到了就推不符合的计划。
 - 用户要求的规格、必须服务和比较方向都须核实；未知或没有改善的旧计划不能作为推荐兜底。客人允许看替代时按他明确放宽的条件重新核对，其他限制继续有效。
 - 历史答问用于理解指代和避免重问，不能借历史补回已撤回条件，不从其他选购读取条件。
@@ -272,6 +273,8 @@ def apply_customer_turn_policy(nodes):
          '''        turn_intent = bundle.get("turn_intent", "shop")
         if action == "interview" and turn_intent in ("lookup", "availability"):
             raise ValueError("查询应直接核对；只有对象或结果范围歧义才能澄清")
+        if turn_intent == "lookup" and len(selected) > 2:
+            raise ValueError("指定计划查询最多核对两个可能对象")
         if action == "recommend":
 '''),
         ('''            if not follow_up["blocking"] and (needs["interview_rounds"] >= 3 or follow_up["topic"] in needs["asked_topics"]):
@@ -283,9 +286,15 @@ def apply_customer_turn_policy(nodes):
         ('            if not (needs["requirements"] or needs["questions"] or needs["user_context"] or needs["interview_rounds"]):',
          '''            if turn_intent == "shop" and not (needs["requirements"] or needs["questions"] or needs["user_context"] or needs["interview_rounds"] or needs["answer_history"]):
 '''.rstrip()),
-        ('            bundle.update(mode="recommend", instruction="当轮展示已核对的初步比较；披露预算、条件及未知信息的缺口，不等待额外确认。", interview_topic="")',
-         '''            mode = "recommend" if turn_intent == "shop" else turn_intent
-            bundle.update(mode=mode, instruction="", interview_topic="")'''),
+        ('            needs["ready_to_recommend"] = True\n            bundle.update(mode="recommend", instruction="当轮展示已核对的初步比较；披露预算、条件及未知信息的缺口，不等待额外确认。", interview_topic="")',
+         '''            if selected:
+                needs["ready_to_recommend"] = True
+                mode = "recommend" if turn_intent == "shop" else turn_intent
+                bundle.update(mode=mode, instruction="", interview_topic="")
+            else:
+                mode = "lookup_unavailable" if turn_intent == "lookup" else "no_match"
+                instruction = "而家未能核實你問嗰款計劃。" if mode == "lookup_unavailable" else ""
+                bundle.update(mode=mode, instruction=instruction, selected_plans=[], interview_topic="")'''),
     )
 
     route = nodes["recommend_route"]["cases"][0]
@@ -294,16 +303,9 @@ def apply_customer_turn_policy(nodes):
         route["conditions"].append({**route["conditions"][0], "id": "details-" + mode, "value": mode})
     edit_code(
         "rank",
-        ('        request.update(selected_plan_codes=selected, shortlist_reason=output["reason"])',
-         '''        if bundle["mode"] != "lookup":
-            prioritized = set(selected)
-            selected += [code for code in request["plan_codes"] if code not in prioritized]
-        request.update(selected_plan_codes=selected, shortlist_reason=output["reason"])'''),
         ('if not isinstance(candidates, list) or len(candidates) > 5:',
          'if not isinstance(candidates, list) or len(candidates) != len(selected):'),
         ('后端候选必须为最多五款套餐的列表', '后端结果必须覆盖所有请求的计划'),
-        ('"questions": sales_needs(needs)["questions"], "limit": 5',
-         '"questions": sales_needs(needs)["questions"], "limit": len(plans_tags)'),
         ('    request = {\n        "business": business, "plan_codes":',
          '''    current = sales_needs(needs)
     excluded_ids = set(bundle.get("temporarily_excluded_ids", []))
@@ -314,6 +316,11 @@ def apply_customer_turn_policy(nodes):
         "business": business, "plan_codes":'''),
         ('"requirements": sales_needs(needs)["requirements"],\n        "questions": sales_needs(needs)["questions"]',
          '"requirements": requirements,\n        "questions": current["questions"]'),
+        ('''        if bundle["mode"] != "lookup":
+            prioritized = set(selected)
+            selected += [code for code in request["plan_codes"] if code not in prioritized]
+        request.update(selected_plan_codes=selected, shortlist_reason=output["reason"])''',
+         '''        request.update(selected_plan_codes=selected, shortlist_reason=output["reason"])'''),
         ('def mock_rank_and_details(business, plans_tags, selected_plan_codes):',
          '''def plan_monthly_fee(markdown):
     section = re.search(r"^###[ ]+基础信息[ ]*$\\n(.*?)(?=^#{1,6}[ ]|\\Z)", markdown, re.M | re.S)
@@ -329,7 +336,7 @@ def mock_rank_and_details(business, plans_tags, selected_plan_codes):'''),
         candidates.append({**plans_by_code[code], "markdown": markdown,
                            "plan_monthly_fee": plan_monthly_fee(markdown)})'''),
     )
-    nodes["rank"]["title"] = "按本輪查詢批量取得可售計劃原文"
+    nodes["rank"]["title"] = "僅讀取本輪初篩計劃原文"
 
     item = prompt("select")
     item["text"] = "\n".join(
@@ -346,9 +353,9 @@ def mock_rank_and_details(business, plans_tags, selected_plan_codes):'''),
     item["text"] = item["text"].replace("月费：180元", "套餐参考月费: 180")
     add_policy("select", """
 ## 核对与本轮结果
-- 选购及查有无时，候选包含当前可售范围的完整原文，按本轮条件核对；优先顺序不限制搜索，检查相关计划，不能只检查开头几项。
+- 只核对本轮初筛提供的原文。从这些计划中按当前问题和有效条件精选0至2款，只有一款合适就只选一款，无可核实的匹配返回空数组，流程到此结束。
 - shop和availability只返回所有priority=required条件均有原文证据支持的计划。临时T编号与R编号同样需要核对。找不到就返回空assessments。preferred用来排序，不默许放宽其他条件。
-- lookup只核对用户所指计划的问题，回复是否符合购买条件不是此轮任务。不要用其他计划替换被问对象。
+- lookup只核对用户所指计划的问题，缺资料的答案标unknown。若有两个合理指代，必须一起核对才能答，不能只取其中一个；无可核对结果时返回空数组。不要用其他计划替换被问对象。
 - 用户想要 Disney+ 时，原文明确可选 Disney+ 的二选一组合可以满足选择该服务的需求。说明需要选 Disney+、适用档位和期数；若用户明确要求两项同时包含，按原文核对。核对优惠时，组合已包含或可选的权益与额外减价分别判断。
 - 预算上限、整套计划月费、哪款较便宜等，一律用plan_monthly_fee核对，即当前原文「基础信息」中的「套餐参考月费」。有结论时引用该字段原文；缺少整套月费则标记unknown。「优惠月费」只用于回答该产品或服务的价格，保留所属时期和条件，不作整套月费或预算依据，也不重新加总或扣减。
 """)
@@ -368,7 +375,7 @@ def mock_rank_and_details(business, plans_tags, selected_plan_codes):'''),
 '''),
         ('for code in selected\n', 'for code in eligible\n'),
         ('        result["recommendations_json"] = dump([',
-         '''        if needs.get("turn_intent") == "lookup" and set(eligible) != set(by_code):
+         '''        if needs.get("turn_intent") == "lookup" and eligible and set(eligible) != set(by_code):
             raise ValueError("查询必须核对全部指定对象，不能任意漏掉其中一款")
         result["recommendations_json"] = dump(['''),
     )
@@ -449,7 +456,7 @@ def mock_rank_and_details(business, plans_tags, selected_plan_codes):'''),
 ## 像香港電訊顧問咁答
 - 每輪只講有助揀計劃嘅重點；先答客戶最想知嘅嘢，唔重播之前講過嘅內容，唔順手展開無關建議。
 - 分段同表格只列整套「計劃參考月費」，一律用plan_monthly_fee（原文「基礎信息」嘅「套餐參考月費」）。缺少呢個值時省略金額。平時推介唔列單項產品嘅「優惠月費」，只有客戶點名問某項服務嘅價錢先簡短回答，交代適用月份同條件。必要另收費用照常列明，唔自行加總月費或再扣回贈。
-- no_match：用一句自然嘅香港粵語直接答冇。優先講客戶今輪問嘅計劃、規格或組合；如果結果受預算或者地址範圍限制，就喺同一句講清楚。按客戶嘅問法組句，唔用固定開場或固定句式。答完就停，唔講資料未注明，唔推舊計劃或替代，亦唔追問。
+- no_match：用一句自然嘅香港粵語講今次暫時搵唔到符合條件嘅計劃，按客戶今輪問嘅規格、組合、預算或地址範圍組句。只交代今次結果，唔斷言全目錄冇貨或地址只支援某個上限。答完就停，唔推舊計劃或替代，亦唔追問。
 - availability：直接答有冇；有可以順帶講相關計劃嘅規格同整套參考月費，唔寫完整推介。提到某款時附上原有計劃編號，方便下一輪接住查。previous_purchase_requirements只可以用嚟提示與上一輪嘅明顯分別，例如今輪搵到嘅計劃超出舊預算，唔可以用佢判斷今輪有冇。客戶明確要求沿用原條件時，回覆講清楚查詢範圍。
 - 問登記優惠時，先交代已核實可揀嘅服務同整套參考月費。額外優惠未能核實，就只講未能確認有額外優惠，唔反過來否定已核實嘅計劃或權益。二選一要講清楚係可選其中一項。
 - lookup：只答客戶問到嘅已核實事實。如果「嗰款」有兩個合理指代，兩款答案一致就直接答；答案不同或未能一併核實，就只問客戶指邊一款。lookup_unavailable跟instruction簡短回覆，唔補推其他計劃。

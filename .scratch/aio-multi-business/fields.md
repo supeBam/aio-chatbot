@@ -292,7 +292,7 @@ MS、XE 的需求对象不因 BN 地址变更而修改。
 
 | 字段 | 类型 | 含义 |
 | --- | --- | --- |
-| `selected_plan_codes` | `array[string]` | 本轮候选中的精确编号，最多 3 个且不重复 |
+| `selected_plan_codes` | `array[string]` | 本轮候选中的精确编号，最多 2 个且不重复 |
 | `assessments` | `array[object]` | 每款精选的 `plan_code`、`requirements` 和 `info_answers`；不能遗漏当前任何需求或咨询ID |
 | `reason` | `string` | 内部精选依据，非额外产品事实来源 |
 
@@ -357,7 +357,7 @@ MS、XE 的需求对象不因 BN 地址变更而修改。
 | `requirement_assessments` | `array[object]` | 仅校验后的精选附带逐需求核对，最终回复须披露不支持与未知项 |
 | `info_answers` | `array[object]` | 仅校验后的精选附带逐咨询回答；每个有效Q编号恰好一次，未知不改写成不包含 |
 
-初筛最多 5 款，原文精选最多 3 款；均不为凑数而补历史结果。
+初筛最多 5 款，原文精选最多 2 款；均不为凑数而补历史结果。
 候选不再附带精确匹配的分数或未命中标记，偏好缺口由模型结合原文核对。
 
 ### 销售展示对象

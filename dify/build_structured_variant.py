@@ -216,11 +216,10 @@ def build(flow):
 def main():
     flow = yaml.safe_load(SOURCE.read_text(encoding="utf-8"))
     result = build(flow)
-    DESTINATION.write_text(
-        yaml.safe_dump(result, allow_unicode=True, sort_keys=False, width=120),
-        encoding="utf-8",
-    )
-    print(DESTINATION)
+    export = yaml.safe_dump(result, allow_unicode=True, sort_keys=False, width=120)
+    for path in (DESTINATION, DESTINATION.with_suffix(".txt")):
+        path.write_text(export, encoding="utf-8")
+        print(path)
 
 
 if __name__ == "__main__":
