@@ -97,6 +97,10 @@
 | 输出套餐办理链接动作 | `product_link_action` | `answer` 后接收 `reply_context` 提供的办理链接列表和业务代码，输出 `frontend_action`、`service_type` 和 `products`。列表每项包含 `plan_code` 和 `link_label`。本轮交付目标是选购，或用户明确索取唯一可定位套餐的入口时，为通过校验的套餐生成入口。查询套餐事实时可以列出套餐详情，办理入口为空。 |
 | 完整回复后记录本业务上下文 | `record_reply` | 按展示结果保存 `last_recommended_codes`，供后续定位「第 2 款」等指代。查条款和索取单款入口沿用这份顺序。 |
 
+继续选购时，需求提取用 `selection_context` 表示另开、调整或查看其他选项。代码沿用未被明确替换的临时条件。「看其他」会排除该选购中已展示的套餐。地址变化会清除旧展示记录，并用新的地址可售范围重新核验。
+
+进入技术错误分支时，工作流直接回复本轮核对未完成，并输出 `NONE`。排查日志时，用 `reply_context.presentation.mode` 和 `link_status` 区分技术错误、无匹配、普通查询和可显示入口。工作流级的 `succeeded` 表示运行已完成，业务结果以节点输出为准。
+
 前端从当前运行中成功完成的 `product_link_action` 节点读取 `data.outputs`。`frontend_action` 为 `SHOW_PRODUCT_LINK` 时，按 `products` 的顺序在流式正文结束后展示入口。每项的 `link_label` 用于显示，顶层 `service_type` 取本轮业务代码。前端结合 `service_type` 和 `plan_code` 按现有规则生成跳转地址，宽频 `BN` 需要带 `qid`，`MS` 和 `XE` 直接按对应服务生成地址。无法生成有效地址的单项可以省略。无入口时动作是 `NONE`，`products` 为空数组。接入时需确认 SSE 通道会透传该节点的动态输出。
 
 ## 3.6 LLM 节点失败处理

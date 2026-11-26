@@ -524,6 +524,107 @@ class CustomerTurnPolicyTests(unittest.TestCase):
         self.assertEqual(context["mode"], "error")
         self.assertNotIn("consultation_plans", json.loads(context["needs_json"]))
 
+    def test_alternatives_inherit_purchase_conditions_and_skip_last_display_after_error(self):
+        codes = ["AX9836ROB", "AX10924DB", "AX12924DPIQOEX"]
+        self.snapshot.update(current_business="BN", bn_scope_codes=codes)
+        offer = self.merge(
+            "需要1G寬頻，月費低過$198", business="BN", turn_intent="availability", delivery_goal="selection",
+            turn_conditions=[
+                {"text": "需要1G宽频", "evidence": ["需要1G寬頻"]},
+                {"text": "月费低于$198", "evidence": ["月費低過$198"]},
+            ],
+        )
+        offer.update(mode="availability", selected_plans=[
+            {"plan_code": code, "markdown": "方案名称: 1000M家居寬頻"} for code in codes[:2]
+        ])
+        context = self.run_node["reply_context"](offer, "")
+        self.snapshot = self.record_reply(context, "兩款都係1000M。")
+        first_snapshot = copy.deepcopy(self.snapshot)
+        added = self.merge("想加埋Disney+", business="BN", selection_context="continue", changes=[
+            {"business": "BN", "operation": "add", "requirement_id": "", "text": "包含Disney+",
+             "attitude": "interested", "priority": "required", "evidence": ["想加埋Disney+"]},
+        ])
+        requirements = json.loads(self.run_node["decision_state"](added)["needs_json"])["requirements"]
+        self.assertEqual([item["text"] for item in requirements], ["包含Disney+", "需要1G宽频", "月费低于$198"])
+        self.snapshot = first_snapshot
+        failed = self.run_node["reply_context"]({**offer, "snapshot": self.snapshot, "mode": "error"}, "")
+        self.assertEqual(failed["link_products"], [])
+        self.snapshot = self.record_reply(failed, "今次未能完成核對。")
+        other = self.merge("还有其他plan吗", business="BN", turn_intent="availability",
+                           delivery_goal="facts", turn_conditions=[])
+        self.assertEqual(other["delivery_goal"], "selection")
+        self.assertEqual(other["excluded_plan_codes"], codes[:2])
+        self.assertEqual([item["text"] for item in other["turn_requirements"]],
+                         ["需要1G宽频", "月费低于$198"])
+        tags = self.run_node["fetch_tags"]("BN", other["snapshot"])["bundle"]["plans_tags"]
+        choice = {"action": "recommend", "selected_plan_codes": [codes[0]], "follow_up": None, "reason": "查找"}
+        self.assertEqual(self.run_node["product_decision"](other, tags, json.dumps(choice))["bundle"]["mode"], "error")
+        choice["selected_plan_codes"] = [codes[2]]
+        decision = self.run_node["product_decision"](other, tags, json.dumps(choice))["bundle"]
+        decision["selected_plans"] = [{"plan_code": codes[2], "markdown": "方案名称: 1000M寬頻"}]
+        current = self.run_node["reply_context"](decision, "")
+        self.assertEqual(self.product_link(current)["products"][0]["plan_code"], codes[2])
+        self.snapshot = self.record_reply(current, "呢款月費較平。")
+        more = self.merge("有冇其他plan", business="BN", turn_intent="availability", delivery_goal="facts")
+        self.assertEqual(more["excluded_plan_codes"], codes)
+        new = self.merge("想查月費高過$300嘅寬頻", business="BN", turn_intent="availability",
+                         delivery_goal="facts", selection_context="new",
+                         turn_conditions=[{"text": "月费高于$300", "evidence": ["月費高過$300"]}])
+        self.assertEqual([item["text"] for item in new["turn_requirements"]], ["月费高于$300"])
+        self.assertNotIn("excluded_plan_codes", new)
+        changed = self.merge("預算改為$300內", business="BN", turn_intent="availability",
+                             delivery_goal="selection", selection_context="continue",
+                             replaced_temporary_ids=["T2"],
+                             turn_conditions=[{"text": "月费不超过$300", "evidence": ["預算改為$300內"]}])
+        self.assertEqual([item["text"] for item in changed["turn_requirements"]], ["需要1G宽频", "月费不超过$300"])
+
+    def test_required_monthly_limit_blocks_out_of_budget_plan_even_with_supported_assessment(self):
+        code = "AE99824TP54OTT"
+        candidates = [{"plan_code": code, "plan_monthly_fee": "998", "markdown": "套餐参考月费: 998"}]
+        needs = {"requirements": [{"id": "T1", "text": "月费低于$198", "priority": "required"}]}
+        selection = {"reason": "回放", "assessments": [{
+            "plan_code": code, "requirements": [{
+                "requirement_id": "T1", "status": "supported",
+                "quote": "套餐参考月费: 998", "explanation": "误判为符合预算",
+            }],
+        }]}
+        checked = self.run_node["validate_selection"](json.dumps(selection), json.dumps(candidates), json.dumps(needs))
+        self.assertEqual(checked["error"], "")
+        self.assertEqual(json.loads(checked["recommendations_json"]), [])
+
+    def test_withdrawing_optional_service_removes_requirement(self):
+        self.snapshot["ms_needs"].update(requirements=[
+            {"id": "R1", "text": "加配Disney+服务", "attitude": "interested", "priority": "required", "evidence": []},
+            {"id": "R2", "text": "月费低于$381", "attitude": "interested", "priority": "required", "evidence": []},
+        ], next_requirement_id=3)
+        message = "唔加配Disney+服務"
+        bundle = self.merge(message, changes=[
+            {"business": "MS", "operation": "update", "requirement_id": "R1",
+             "text": "不加配Disney+服务", "attitude": "uninterested", "priority": "required", "evidence": [message]},
+        ])
+        self.assertEqual([item["id"] for item in bundle["snapshot"]["ms_needs"]["requirements"]], ["R2"])
+        message = "不要包含Disney+服务"
+        excluded = self.merge(message, changes=[
+            {"business": "MS", "operation": "update", "requirement_id": "R1",
+             "text": message, "attitude": "uninterested", "priority": "required", "evidence": [message]},
+        ])
+        self.assertEqual(excluded["snapshot"]["ms_needs"]["requirements"][0]["attitude"], "uninterested")
+        self.snapshot["ms_needs"]["requirements"][0].update(
+            text="不加配Disney+服务", attitude="uninterested", evidence=["唔加配Disney+服務"]
+        )
+        legacy = self.merge("不要Disney+服務了", changes=[])
+        self.assertEqual([item["id"] for item in legacy["snapshot"]["ms_needs"]["requirements"]], ["R2"])
+
+    def test_shortlist_retries_compatibly_with_literal_boolean_strings(self):
+        bundle = self.merge("我想揀上台計劃")
+        plans = self.run_node["fetch_tags"]("MS", bundle["snapshot"])["bundle"]["plans_tags"]
+        result = {"action": "clarify", "selected_plan_codes": [], "reason": "對象未能確定",
+                  "follow_up": {"topic": "計劃指代", "information_needed": "你指邊一款？",
+                                "selection_impact": "按指定計劃核對", "blocking": "true"}}
+        validated = self.run_node["shortlist_validation"](bundle, plans, result)
+        self.assertFalse(validated["retry"], validated["error"])
+        self.assertIs(json.loads(validated["text"])["follow_up"]["blocking"], True)
+
     def test_reply_context_distinguishes_router_terms_and_surfaces_speed_conflict(self):
         for business, codes in (
             ("BN", ["AX9836ROB", "AW37827F3PROV", "AU14924HTOOTT_C3F24NOR30IDD"]),

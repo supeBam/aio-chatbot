@@ -10,11 +10,13 @@ if __package__:
     from .customer_turn_policy import apply_customer_turn_policy
     from .model_output_schemas import MODEL_SCHEMAS, RECOMMENDATION_LIMIT
     from .product_link_policy import apply_product_link_policy
+    from .purchase_continuation import apply_purchase_continuation
     from .recommendation_delivery import apply_recommendation_delivery
 else:
     from customer_turn_policy import apply_customer_turn_policy
     from model_output_schemas import MODEL_SCHEMAS, RECOMMENDATION_LIMIT
     from product_link_policy import apply_product_link_policy
+    from purchase_continuation import apply_purchase_continuation
     from recommendation_delivery import apply_recommendation_delivery
 
 
@@ -213,6 +215,7 @@ def build(flow):
     apply_customer_turn_policy(nodes)
     apply_product_link_policy(graph)
     apply_recommendation_delivery(graph)
+    apply_purchase_continuation(graph)
     return flow
 
 

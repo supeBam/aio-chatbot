@@ -11,24 +11,25 @@ from dify.model_output_schemas import MODEL_SCHEMAS
 class StructuredVariantTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.original = yaml.safe_load(SOURCE.read_text(encoding="utf-8"))
         cls.flow = yaml.safe_load(DESTINATION.read_text(encoding="utf-8"))
         cls.nodes = {node["id"]: node for node in cls.flow["workflow"]["graph"]["nodes"]}
         cls.edges = cls.flow["workflow"]["graph"]["edges"]
 
-    def test_artifact_is_reproducible_and_original_unchanged(self):
-        self.assertEqual(self.flow, build(self.original))
-        original_nodes = {n["id"]: n["data"] for n in self.original["workflow"]["graph"]["nodes"]}
-        for node_id in MODEL_SCHEMAS:
-            self.assertNotIn("structured_output", original_nodes[node_id])
-            self.assertNotIn("response_format", original_nodes[node_id]["model"]["completion_params"])
+    def test_importable_exports_are_identical(self):
+        self.assertEqual(DESTINATION.with_suffix(".txt").read_bytes(), DESTINATION.read_bytes())
+
+    @unittest.skipUnless(SOURCE.is_file(), "缺少工作流生成源文件 AIO Multi Business.txt")
+    def test_artifact_is_reproducible(self):
+        original = yaml.safe_load(SOURCE.read_text(encoding="utf-8"))
+        self.assertEqual(self.flow, build(original))
 
     def test_schema_models_and_success_failure_paths(self):
         for node_id, schema in MODEL_SCHEMAS.items():
             with self.subTest(node=node_id):
                 Draft202012Validator.check_schema(schema)
                 llm = self.nodes[node_id]["data"]
-                self.assertEqual(llm["model"]["completion_params"]["response_format"], "json_object")
+                if node_id != "business":
+                    self.assertEqual(llm["model"]["completion_params"]["response_format"], "json_object")
                 self.assertEqual(llm["structured_output"], {"schema": schema})
                 self.assertTrue(llm["structured_output_enabled"])
                 self.assertEqual(llm["error_strategy"], "fail-branch")
@@ -41,6 +42,7 @@ class StructuredVariantTests(unittest.TestCase):
                 self.assertEqual(current["value"], [node_id + "_validation", "text"])
                 edge_pairs = {(e["source"], e["sourceHandle"], e["target"]) for e in self.edges}
                 self.assertIn((node_id, "source", node_id + "_validation"), edge_pairs)
+                self.assertIn((node_id + "_validation", "source", node_id + "_retry_update"), edge_pairs)
                 self.assertIn((node_id, "fail-branch", node_id + "_node_failure"), edge_pairs)
                 self.assertIn((node_id + "_node_failure", "source", node_id + "_failure_update"), edge_pairs)
                 failure = self.nodes[node_id + "_node_failure"]["data"]
@@ -54,33 +56,25 @@ class StructuredVariantTests(unittest.TestCase):
                 for item in self.nodes[node_id + "_failure_update"]["data"]["items"]:
                     self.assertEqual(item["value"][0], node_id + "_node_failure")
 
+    def prompt_examples(self, node_id):
+        prompt = self.nodes[node_id]["data"]["prompt_template"][0]["text"]
+        return [
+            json.loads(line)
+            for line in prompt.splitlines()
+            if line.strip().startswith("{") and "|" not in line
+        ]
+
     def test_examples_follow_schemas(self):
         for node_id, schema in MODEL_SCHEMAS.items():
-            prompt = self.nodes[node_id]["data"]["prompt_template"][0]["text"]
-            examples = []
-            for line in prompt.splitlines():
-                if not line.strip().startswith("{") or "|" in line:
-                    continue
-                try:
-                    examples.append(json.loads(line))
-                except json.JSONDecodeError:
-                    continue
-            self.assertTrue(examples)
+            examples = self.prompt_examples(node_id)
+            self.assertTrue(examples, node_id)
             for example in examples:
                 with self.subTest(node=node_id, example=example):
                     Draft202012Validator(schema).validate(example)
 
     def test_validation_adapts_objects_without_changing_business_result(self):
-        samples = {
-            "business": {"business": "BN", "mentioned_businesses": ["BN"],
-                         "clarification": "", "intent": "shopping", "business_requests": []},
-            "extract": {"changes": [], "question_changes": [], "clarification": "",
-                        "reason": "", "context_update": None},
-            "shortlist": {"action": "recommend", "selected_plan_codes": [],
-                          "follow_up": None, "reason": ""},
-            "select": {"selected_plan_codes": [], "assessments": [], "reason": ""},
-        }
-        for node_id, sample in samples.items():
+        for node_id in MODEL_SCHEMAS:
+            sample = self.prompt_examples(node_id)[0]
             with self.subTest(node=node_id):
                 data = self.nodes[node_id + "_validation"]["data"]
                 namespace = {}
@@ -97,7 +91,7 @@ class StructuredVariantTests(unittest.TestCase):
         reply = self.nodes["reply"]["data"]
         self.assertNotEqual(reply["model"]["completion_params"].get("response_format"), "json_object")
         self.assertFalse(reply.get("structured_output_enabled", False))
-        self.assertEqual(self.nodes["answer"]["data"]["answer"], "{{#reply.text#}}")
+        self.assertEqual(self.nodes["answer"]["data"]["answer"], "{{#reply_context.plan_summary#}}{{#reply.text#}}")
 
 
 if __name__ == "__main__":

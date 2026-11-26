@@ -2,93 +2,24 @@ import copy
 import json
 import unittest
 
-from jsonschema import Draft202012Validator
-
-from dify.build_multi_business_workflow import build
 from dify.measure_json_outputs import classify_attempt, summarize
-from dify.model_output_schemas import MODEL_SCHEMAS
 
 
-class StructuredOutputContractTests(unittest.TestCase):
-    def test_deepseek_internal_nodes_request_native_json_format(self):
-        for enabled in (False, True):
-            nodes = {node["id"]: node["data"]
-                     for node in build(structured_outputs=enabled)["workflow"]["graph"]["nodes"]}
-            for node_id in MODEL_SCHEMAS:
-                with self.subTest(schema=enabled, node=node_id):
-                    self.assertEqual(nodes[node_id]["model"]["completion_params"].get("response_format"),
-                                     "json_object")
-            self.assertNotEqual(nodes["reply"]["model"]["completion_params"].get("response_format"),
-                                "json_object")
+VALID_EXTRACT = {
+    "changes": [], "question_changes": [], "clarification": "", "reason": "",
+    "context_update": None, "turn_intent": "shop", "link_request": "",
+    "delivery_goal": "selection", "selection_context": "new", "replaced_temporary_ids": [],
+    "availability_scope": "current_purchase", "turn_conditions": [],
+    "temporarily_excluded_ids": [], "purchase_switch": None,
+}
 
-    def test_dify_llm_success_handle_reaches_validation_and_loop_update(self):
-        graph = build()["workflow"]["graph"]
-        for model_id in MODEL_SCHEMAS:
-            with self.subTest(model=model_id):
-                reachable = {model_id}
-                pending = [model_id]
-                while pending:
-                    source = pending.pop()
-                    for edge in graph["edges"]:
-                        if edge["source"] != source:
-                            continue
-                        expected_handle = "source"
-                        if edge["sourceHandle"] != expected_handle:
-                            continue
-                        if edge["target"] not in reachable:
-                            reachable.add(edge["target"])
-                            pending.append(edge["target"])
-                self.assertIn(model_id + "_validation", reachable,
-                              "Dify emits source on LLM success; missing it leaves current_text empty")
-                self.assertIn(model_id + "_retry_update", reachable)
 
-    def test_schemas_are_valid_and_internal_nodes_enable_them(self):
-        nodes = {node["id"]: node["data"] for node in build()["workflow"]["graph"]["nodes"]}
-        for node_id, schema in MODEL_SCHEMAS.items():
-            with self.subTest(node=node_id):
-                Draft202012Validator.check_schema(schema)
-                self.assertTrue(nodes[node_id]["structured_output_enabled"])
-                self.assertEqual(nodes[node_id]["structured_output"]["schema"], schema)
-                self.assertEqual(nodes[node_id]["error_strategy"], "fail-branch")
-                self.assertIn(node_id + "_node_failure", nodes)
-        self.assertFalse(nodes["reply"]["structured_output_enabled"])
-        self.assertNotIn("structured_output", nodes["reply"])
-        self.assertEqual(nodes["answer"]["answer"], "{{#reply.text#}}")
-
-    def test_baseline_switch_only_removes_schemas_not_failure_handling(self):
-        baseline = build(structured_outputs=False)
-        nodes = {node["id"]: node["data"] for node in baseline["workflow"]["graph"]["nodes"]}
-        for node_id in MODEL_SCHEMAS:
-            self.assertFalse(nodes[node_id]["structured_output_enabled"])
-            self.assertNotIn("structured_output", nodes[node_id])
-            self.assertIn(node_id + "_node_failure", nodes)
-            self.assertEqual(nodes[node_id]["error_strategy"], "fail-branch")
-        with self.assertRaises(ValueError):
-            build(structured_outputs="false")
-        treatment = build()
-        for node in treatment["workflow"]["graph"]["nodes"]:
-            if node["id"] in MODEL_SCHEMAS:
-                node["data"].pop("structured_output")
-                node["data"]["structured_output_enabled"] = False
-        self.assertEqual(treatment, baseline)
-
-    def test_literal_prompt_examples_match_their_schema(self):
-        nodes = {node["id"]: node["data"] for node in build()["workflow"]["graph"]["nodes"]}
-        for node_id, schema in MODEL_SCHEMAS.items():
-            examples = []
-            for line in nodes[node_id]["prompt_template"][0]["text"].splitlines():
-                if line.strip().startswith("{") and "|" not in line:
-                    examples.append(json.loads(line))
-            self.assertTrue(examples, node_id)
-            for example in examples:
-                with self.subTest(node=node_id, example=example):
-                    Draft202012Validator(schema).validate(example)
-
+class JsonFailureMeasurementTests(unittest.TestCase):
     def test_valid_contracts_and_type_errors_are_measured_separately_from_semantics(self):
         valid = {
             "business": {"business": "BN", "mentioned_businesses": ["BN"], "intent": "shopping",
                          "clarification": "", "business_requests": []},
-            "extract": {"changes": [], "question_changes": [], "clarification": "", "reason": "", "context_update": None},
+            "extract": VALID_EXTRACT,
             "shortlist": {"action": "recommend", "selected_plan_codes": ["UNKNOWN_BUT_STRING"],
                           "follow_up": None, "reason": "compare"},
             "select": {"assessments": [], "reason": "compare"},
@@ -99,18 +30,16 @@ class StructuredOutputContractTests(unittest.TestCase):
             self.assertEqual(classify_attempt({"text": json.dumps(invalid)}, node_id), "schema")
             self.assertEqual(classify_attempt({"text": "```json\n{}\n```"}, node_id), "syntax")
         for invalid in (
-            {"changes": "not an array", "question_changes": [], "clarification": "", "reason": "", "context_update": None},
-            {"changes": [], "question_changes": [], "clarification": "", "reason": "", "context_update": 1},
+            {**VALID_EXTRACT, "changes": "not an array"},
+            {**VALID_EXTRACT, "context_update": 1},
         ):
             self.assertEqual(classify_attempt({"text": json.dumps(invalid)}, "extract"), "schema")
 
-
-class JsonFailureMeasurementTests(unittest.TestCase):
     def record(self, case="one", variant="schema", attempts=None):
         return {
             "case_id": case, "variant": variant, "node_id": "extract",
             "attempts": attempts if attempts is not None else [{
-                "text": '{"changes":[],"question_changes":[],"clarification":"","reason":"","context_update":null}',
+                "text": json.dumps(VALID_EXTRACT),
             }],
         }
 

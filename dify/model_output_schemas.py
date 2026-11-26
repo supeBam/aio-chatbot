@@ -48,6 +48,8 @@ MODEL_SCHEMAS = {
         "turn_intent": enum_schema("shop", "lookup", "availability"),
         "link_request": TEXT,
         "delivery_goal": enum_schema("selection", "facts", "link"),
+        "selection_context": enum_schema("new", "continue", "alternatives"),
+        "replaced_temporary_ids": array_schema(TEXT, 20),
         "availability_scope": enum_schema("catalog", "current_purchase"),
         "turn_conditions": array_schema(object_schema({
             "text": TEXT, "evidence": EVIDENCE,

@@ -23,7 +23,7 @@ class LatestPlanDataTests(unittest.TestCase):
             business: json.loads((ROOT / (business.lower() + "_plan_tags_new.json")).read_text(encoding="utf-8"))
             for business in ("BN", "MS", "XE")
         }
-        cls.flow = yaml.safe_load((ROOT / "dify" / "AIO Multi Business.txt").read_text(encoding="utf-8"))
+        cls.flow = yaml.safe_load((ROOT / "dify" / "AIO Multi Business Structured.yml").read_text(encoding="utf-8"))
         cls.nodes = {node["id"]: node["data"] for node in cls.flow["workflow"]["graph"]["nodes"]}
 
     def literal(self, node_id, name):

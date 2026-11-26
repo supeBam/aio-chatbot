@@ -6,7 +6,6 @@ from pathlib import Path
 import yaml
 from jsonschema import Draft202012Validator
 
-from dify.build_structured_variant import SOURCE, build
 from dify.model_output_schemas import MODEL_SCHEMAS
 
 
@@ -137,25 +136,6 @@ class StructuredRetryContractTests(unittest.TestCase):
         schema = data["structured_output"]["schema"]
         self.assertEqual(set(schema["properties"]), {"assessments", "reason"})
         self.assertNotIn('"selected_plan_codes"', data["prompt_template"][0]["text"])
-
-    def test_generator_preserves_new_selection_contract(self):
-        flow = build(yaml.safe_load(SOURCE.read_text(encoding="utf-8")))
-        nodes = {node["id"]: node["data"] for node in flow["workflow"]["graph"]["nodes"]}
-        self.assertEqual(nodes["select"]["structured_output"]["schema"], MODEL_SCHEMAS["select"])
-        prompt = nodes["select"]["prompt_template"][0]["text"]
-        self.assertNotIn('"selected_plan_codes"', prompt)
-        for line in prompt.splitlines():
-            if line.strip().startswith("{") and "|" not in line:
-                Draft202012Validator(MODEL_SCHEMAS["select"]).validate(json.loads(line))
-        namespace = {}
-        exec(compile(nodes["select_validation"]["code"], "select_validation", "exec"), namespace)
-        result = namespace["main"](
-            llm_output={"assessments": [{"plan_code": "P1", "requirements": [], "info_answers": []}],
-                        "reason": ""},
-            candidates_json=json.dumps([{"plan_code": "P1", "markdown": "原文"}]),
-            needs_json=json.dumps({"requirements": [], "questions": []}),
-        )
-        self.assertFalse(result["retry"], result["error"])
 
     def test_question_coverage_and_original_quotes_remain_enforced(self):
         namespace = {}

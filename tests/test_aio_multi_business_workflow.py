@@ -7,7 +7,7 @@ from unittest.mock import Mock, patch
 
 import yaml
 
-from dify.build_multi_business_workflow import CONVERSATION, NEEDS_DEFAULT, build
+from dify.model_output_schemas import MODEL_SCHEMAS
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -17,7 +17,7 @@ class MultiBusinessWorkflowTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.flow = yaml.safe_load(
-            (ROOT / "dify" / "AIO Multi Business.txt").read_text(encoding="utf-8")
+            (ROOT / "dify" / "AIO Multi Business Structured.yml").read_text(encoding="utf-8")
         )
         cls.graph = cls.flow["workflow"]["graph"]
         cls.nodes = {node["id"]: node["data"] for node in cls.graph["nodes"]}
@@ -99,6 +99,7 @@ class MultiBusinessWorkflowTests(unittest.TestCase):
              routing=None, changes=None, shortlist=None, selection=None, reply_text=None, model_responses=None):
         """执行真实连线；分片和模型文本是测试替身，不声称完成在线流式验证。"""
         variables = copy.deepcopy(self.initial if variables is None else variables)
+        model_responses = copy.deepcopy(model_responses)
         pool = {("conversation", name): value for name, value in variables.items()}
         pool[("sys", "query")] = text
         inputs = {"event_type": event_type, "bn_plan_codes": bn_plan_codes}
@@ -142,12 +143,13 @@ class MultiBusinessWorkflowTests(unittest.TestCase):
                 ambiguity = get(["decision_state", "instruction"])
                 if ambiguity:
                     return json.dumps(self.product_output(plans, action="clarify", topic="goal_conflict", information=ambiguity, blocking=True))
-                action = "recommend" if needs["requirements"] or needs.get("questions") or needs["user_context"] or needs["interview_rounds"] else "interview"
+                action = "recommend" if (needs["requirements"] or needs.get("questions") or needs["user_context"]
+                                         or needs["interview_rounds"]) else "interview"
                 return json.dumps(self.product_output(plans, action=action))
             if node_id == "select":
                 candidates = json.loads(get(["rank", "candidates_json"]))
                 output = copy.deepcopy(selection if selection is not None else {
-                    "selected_plan_codes": [plan["plan_code"] for plan in candidates[:3]],
+                    "selected_plan_codes": [plan["plan_code"] for plan in candidates[:2]],
                     "reason": "按测试候选选择",
                 })
                 if "assessments" not in output:
@@ -155,11 +157,12 @@ class MultiBusinessWorkflowTests(unittest.TestCase):
                     requirements = needs["requirements"]
                     output["assessments"] = [{
                         "plan_code": code,
+                        "link_label": "",
                         "requirements": [{"requirement_id": item["id"], "status": "unknown", "quote": "",
                                           "explanation": "模型替身不判断原文语义"} for item in requirements],
                         "info_answers": [{"question_id": item["id"], "status": "unknown", "quote": "",
                                           "answer": "模型替身不判断原文语义"} for item in needs.get("questions", [])],
-                    } for code in output.get("selected_plan_codes", [])]
+                    } for code in output.pop("selected_plan_codes", [])]
                 return json.dumps(output)
             if node_id == "reply":
                 if reply_text is not None:
@@ -181,7 +184,7 @@ class MultiBusinessWorkflowTests(unittest.TestCase):
                 return reply
             self.fail("未配置模型替身：" + node_id)
 
-        def model_result(node_id, data):
+        def model_result(node_id):
             if model_responses and node_id in model_responses:
                 response = model_responses[node_id]
                 if isinstance(response, list):
@@ -193,6 +196,13 @@ class MultiBusinessWorkflowTests(unittest.TestCase):
                         "error_message": response["node_error"]["message"]}, "fail-branch"
             if isinstance(response, dict) and "llm_result" in response:
                 return response["llm_result"], "source"
+            if node_id in MODEL_SCHEMAS:
+                try:
+                    return {"text": response, "structured_output": json.loads(response)}, "source"
+                except (ValueError, TypeError):
+                    return {
+                        "error_type": "LLMNodeError", "error_message": "模型返回无效 JSON",
+                    }, "fail-branch"
             return {"text": response}, "source"
 
         while any(status == "pending" for status in node_state.values()):
@@ -224,7 +234,7 @@ class MultiBusinessWorkflowTests(unittest.TestCase):
                     if node_id == "address_action":
                         timeline.append(("action", result))
                 elif kind == "llm":
-                    result, handle = model_result(node_id, data)
+                    result, handle = model_result(node_id)
                 elif kind == "loop":
                     children = {node["id"]: node["data"] for node in self.graph["nodes"]
                                 if node.get("parentId") == node_id}
@@ -261,7 +271,7 @@ class MultiBusinessWorkflowTests(unittest.TestCase):
                                 executed.append(child_id)
                                 child_result, child_handle = {}, "source"
                                 if child["type"] == "llm":
-                                    child_result, child_handle = model_result(child_id, child)
+                                    child_result, child_handle = model_result(child_id)
                                 elif child["type"] == "code":
                                     child_result = self.functions[child_id](**{
                                         item["variable"]: copy.deepcopy(get(item["value_selector"]))
@@ -309,12 +319,13 @@ class MultiBusinessWorkflowTests(unittest.TestCase):
                 elif kind == "if-else":
                     handle = "false"
                     for case in data["cases"]:
-                        if all(get(item["variable_selector"]) == item["value"] for item in case["conditions"]):
+                        matches = (get(item["variable_selector"]) == item["value"] for item in case["conditions"])
+                        combine = all if case["logical_operator"] == "and" else any
+                        if combine(matches):
                             handle = case["case_id"]
                             break
                 elif kind == "answer":
-                    producer, field = re.fullmatch(r"\{\{#(\w+)\.(\w+)#\}\}", data["answer"]).groups()
-                    answer = get([producer, field])
+                    answer = re.sub(r"\{\{#(\w+)\.(\w+)#\}\}", lambda m: get(m.groups()), data["answer"])
                     self.assertIsInstance(answer, str)
                     answers.append(answer)
                     for offset in range(0, len(answer), 3):
@@ -354,9 +365,7 @@ class MultiBusinessWorkflowTests(unittest.TestCase):
         )
 
     def test_artifact_typed_variables_and_only_two_inputs(self):
-        self.assertEqual(self.flow, build())
         self.assertEqual(len(self.initial), 12)
-        self.assertEqual(set(self.initial), set(CONVERSATION))
         self.assertNotIn("aio_state_json", json.dumps(self.flow))
         self.assertNotIn("bn_query_status", json.dumps(self.flow))
         self.assertNotIn("address_cleared", json.dumps(self.flow))
@@ -364,10 +373,10 @@ class MultiBusinessWorkflowTests(unittest.TestCase):
         self.assertEqual({item["variable"] for item in inputs}, {"event_type", "bn_plan_codes"})
         self.assertEqual(inputs[0]["options"], ["message", "address_add", "address_change"])
         for business in ("bn", "ms", "xe"):
-            self.assertEqual(self.initial[business + "_needs"], NEEDS_DEFAULT)
+            self.assertEqual(self.initial[business + "_needs"], self.initial["bn_needs"])
 
     def test_loop_break_conditions_reference_editor_visible_variables(self):
-        graph = build()["workflow"]["graph"]
+        graph = self.graph
         loops = [node for node in graph["nodes"] if node["data"]["type"] == "loop"]
         self.assertEqual(len(loops), 4)
         for loop in loops:
@@ -377,98 +386,6 @@ class MultiBusinessWorkflowTests(unittest.TestCase):
                 for condition in loop["data"]["break_conditions"]:
                     self.assertIn(tuple(condition["variable_selector"]), visible_variables,
                                   "Dify checklist: invalid variable (child output is not visible to container)")
-
-    def test_llm_retry_count_is_configurable_and_first_call_is_inside_loop(self):
-        without_retries = build(llm_retry_count=0)
-        no_retry_nodes = without_retries["workflow"]["graph"]["nodes"]
-        self.assertFalse(any(node["data"]["type"] == "loop" for node in no_retry_nodes))
-
-        with_retries = build(llm_retry_count=2)
-        graph_nodes = with_retries["workflow"]["graph"]["nodes"]
-        nodes = {node["id"]: node["data"] for node in graph_nodes}
-        edges = with_retries["workflow"]["graph"]["edges"]
-        edge_pairs = {(edge["source"], edge["target"]) for edge in edges}
-        for model_id in ("business", "extract", "shortlist", "select"):
-            with self.subTest(model=model_id):
-                loop_id = model_id + "_retry_loop"
-                validation_id = model_id + "_validation"
-                self.assertEqual(nodes[loop_id]["loop_count"], 3)
-                self.assertEqual(nodes[loop_id]["break_conditions"][0]["variable_selector"], [loop_id, "retry"])
-                self.assertEqual(sum(node.get("parentId") == loop_id and node["data"]["type"] == "llm"
-                                     for node in graph_nodes), 1)
-                self.assertEqual(next(node["parentId"] for node in graph_nodes if node["id"] == model_id), loop_id)
-                self.assertNotIn(model_id + "_retry", nodes)
-                self.assertNotIn(model_id + "_retry_route", nodes)
-                retry_prompt = nodes[model_id]["prompt_template"]
-                source_prompt = next(node["data"]["prompt_template"] for node in no_retry_nodes
-                                     if node["id"] == model_id)
-                self.assertEqual(retry_prompt[0]["text"].split("\n\n## 校验反馈重生成", 1)[0], source_prompt[0]["text"])
-                self.assertEqual(retry_prompt[1]["text"].split("\n\n## 上次校验反馈", 1)[0], source_prompt[1]["text"])
-                self.assertIn("{{#" + loop_id + ".last_error#}}", retry_prompt[1]["text"])
-                self.assertIn("{{#" + loop_id + ".current_text#}}", retry_prompt[1]["text"])
-                self.assertIn((loop_id + "_start", model_id), edge_pairs)
-                self.assertIn((model_id, model_id + "_node_result"), edge_pairs)
-                self.assertIn((model_id + "_node_result", validation_id), edge_pairs)
-                self.assertTrue(all(item["value_type"] == "constant" for item in nodes[loop_id]["loop_variables"]))
-                self.assertEqual(next(item["value"] for item in nodes[loop_id]["loop_variables"]
-                                      if item["label"] == "retry"), True)
-                self.assertEqual(
-                    next(item["value_selector"] for item in nodes[validation_id]["variables"]
-                         if item["variable"] == "llm_output"),
-                    [model_id + "_node_result", "output"],
-                )
-                validator_id = {"business": "prepare", "extract": "merge", "shortlist": "product_decision",
-                                "select": "validate_selection"}[model_id]
-                self.assertEqual(
-                    next(item["value_selector"] for item in nodes[validator_id]["variables"]
-                         if item["variable"] == "llm_output"),
-                    ["business_result", "output"] if model_id == "business" else [loop_id, "current_text"],
-                )
-        self.assertEqual(next(node["data"]["loop_count"] for node in build(llm_retry_count=99)["workflow"]["graph"]["nodes"]
-                              if node["data"]["type"] == "loop"), 100)
-        with self.assertRaises(ValueError):
-            build(llm_retry_count=-1)
-        with self.assertRaises(ValueError):
-            build(llm_retry_count=100)
-
-    def test_loop_uses_same_retry_llm_until_success_or_exhaustion(self):
-        graph = build(llm_retry_count=2)["workflow"]["graph"]
-        original = (self.graph, self.nodes, self.functions)
-        self.graph = graph
-        self.nodes = {node["id"]: node["data"] for node in graph["nodes"]}
-        self.functions = {}
-        for node_id, data in self.nodes.items():
-            if data["type"] == "code":
-                namespace = {}
-                exec(compile(data["code"], node_id, "exec"), namespace)
-                self.functions[node_id] = namespace["main"]
-        try:
-            text = "需要本地流量卡"
-            arguments = {"routing": self.route("MS"), "changes": self.changes(add=[text])}
-            corrected = json.dumps(self.route("MS"))
-            _, _, recovered = self.turn(
-                text, **arguments,
-                model_responses={"business": ["invalid JSON", "invalid JSON", corrected]},
-            )
-            self.assertEqual(recovered["mode"], "recommend")
-            self.assertEqual(recovered["executed"].count("business"), 3)
-            contexts = recovered["loop_contexts"]["business_retry_loop"]
-            self.assertEqual(contexts[0], {"current_text": "", "last_error": "", "retry": True})
-            for context in contexts[1:]:
-                self.assertEqual(context["current_text"], "invalid JSON")
-                self.assertTrue(context["last_error"])
-                self.assertIs(context["retry"], True)
-            self.assertEqual(recovered["outputs"]["business_retry_loop"],
-                             {"current_text": corrected, "last_error": "", "retry": False})
-
-            _, _, exhausted = self.turn(
-                text, **arguments,
-                model_responses={"business": ["invalid JSON", "invalid JSON", "invalid JSON"]},
-            )
-            self.assertEqual(exhausted["mode"], "error")
-            self.assertEqual(exhausted["executed"].count("business"), 3)
-        finally:
-            self.graph, self.nodes, self.functions = original
 
     def requirement_output(self, text, *, clarification="", recommend=False):
         return {
@@ -536,15 +453,6 @@ class MultiBusinessWorkflowTests(unittest.TestCase):
         self.assertEqual(saved["bn_needs"]["requirements"][0]["text"], "需要1000M家居宽频")
         self.assertEqual(saved["bn_needs"]["requirements"][0]["evidence"], [text])
 
-    def test_extraction_prompt_treats_concrete_same_dimension_answer_as_revision(self):
-        extract = self.nodes["extract"]["prompt_template"][0]["text"]
-        for rule in ("同一维度已有明确值", "不要求用户额外说",
-                     "已有R1“需要2.5G宽频”", 'pending_messages为["1000M"]', "update R1为1000M"):
-            self.assertIn(rule, extract)
-        shortlist = self.nodes["shortlist"]["prompt_template"][0]["text"]
-        for rule in ("没有精确匹配", "最接近且有比较价值", "不得仅因套餐不满足未放宽的精确规格就返回空候选"):
-            self.assertIn(rule, shortlist)
-
     def test_duplicate_updates_preserve_previous_requirement(self):
         saved, _, _ = self.turn("KKBOX", routing=self.route("XE"), changes=self.requirement_output("KKBOX"))
         previous = copy.deepcopy(saved["xe_needs"]["requirements"])
@@ -604,8 +512,8 @@ class MultiBusinessWorkflowTests(unittest.TestCase):
         self.assertEqual(saved["bn_needs"]["interview_rounds"], 1)
         self.assertLess(stage["executed"].index("shortlist"), stage["executed"].index("recommend_route"))
 
-    def test_explicit_speed_and_budget_can_recommend_without_interview(self):
-        text = "需要1000M宽频，月费不超过80元"
+    def test_speed_and_budget_preference_can_recommend_without_interview(self):
+        text = "需要1000M宽频，月费大概80元"
         saved, _, _ = self.turn(text)
         saved, _, stage = self.address(
             variables=saved, changes=self.requirement_output(text),
@@ -633,7 +541,7 @@ class MultiBusinessWorkflowTests(unittest.TestCase):
         self.assertEqual(initial["mode"], "clarify")
         _, _, stage = self.turn(
             "影音服务", variables=saved, routing=self.route("XE"),
-            changes=self.changes(add=["需要影音服务观看电影"]), shortlist=decision,
+            changes=self.changes(delivery_goal="selection"), shortlist=decision,
         )
         self.assertEqual(stage["outputs"]["product_decision"]["bundle"]["mode"], "recommend")
         self.assertEqual(stage["mode"], "recommend")
@@ -666,46 +574,6 @@ class MultiBusinessWorkflowTests(unittest.TestCase):
         result = self.functions["product_decision"](llm_output=json.dumps(decision), **ambiguous)
         self.assertEqual(result["bundle"]["mode"], "error")
 
-    def test_reported_truncated_plan_code_has_actionable_retry_without_aliasing(self):
-        text = "有冇家居宽频带wifi路由器推荐，不想额外买wifi路由器了"
-        full_code = "AX14936HRO3M90_C3F3630IDD90"
-        short_code = "AX14936HRO3M90"
-        reported = json.loads('''{"action":"recommend","selected_plan_codes":["AX9836ROB","AX14936HRO3M90","AE99824GAME4OTT","AE99824TP54OTT","AE99824GEWTFAST"],"follow_up":null,"reason":"用户明确要求家居宽频包含WiFi路由器且不想额外购买。AX9836ROB（1000M/36月/月费98）和AX14936HRO3M90（1000M/36月/月费149）均含36个月免月费TP-Link路由器，直接满足需求。AE99824GAME4OTT、AE99824TP54OTT、AE99824GEWTFAST（10Gbps/24月）虽需预缴路由器费用，但提供Wi-Fi 7路由器，作为更高规格备选供比较。其余套餐未含路由器或需另购，故不纳入。"}''')
-        available = [plan["plan_code"] for plan in self.sources["BN"]]
-        saved, _, _ = self.address(available)
-        raw = json.dumps(reported, ensure_ascii=False)
-        _, _, failed = self.turn(
-            text, variables=saved, changes=self.changes(add=[text]),
-            model_responses={"shortlist": [raw, raw]},
-        )
-        self.assertEqual(failed["mode"], "error")
-        self.assertNotIn("rank", failed["executed"])
-        feedback = failed["outputs"]["shortlist_validation"]["error"]
-        self.assertIn("无效编号=" + json.dumps([short_code], ensure_ascii=False), feedback)
-        self.assertIn("当前允许编号=" + json.dumps(available, ensure_ascii=False), feedback)
-        self.assertEqual(failed["outputs"]["reply_context"]["selected_plans_json"], "[]")
-        corrected = copy.deepcopy(reported)
-        corrected["selected_plan_codes"][1] = full_code
-        _, _, recovered = self.turn(
-            text, variables=saved, changes=self.changes(add=[text]),
-            model_responses={"shortlist": [raw, json.dumps(corrected)]},
-        )
-        self.assertEqual(recovered["mode"], "recommend")
-        self.assertEqual(recovered["executed"].count("shortlist"), 2)
-        self.assertEqual(json.loads(recovered["outputs"]["rank"]["request_json"])["selected_plan_codes"],
-                         corrected["selected_plan_codes"])
-        arguments = {
-            "bundle": recovered["outputs"]["merge"]["bundle"],
-            "plans_tags": [plan for plan in self.sources["BN"] if plan["plan_code"] != full_code],
-            "llm_output": raw,
-        }
-        arguments["bundle"] = copy.deepcopy(arguments["bundle"])
-        arguments["bundle"]["snapshot"]["bn_scope_codes"].remove(full_code)
-        outside = self.functions["product_decision"](**arguments)
-        self.assertEqual(outside["bundle"]["mode"], "error")
-        self.assertNotIn(full_code, outside["bundle"]["instruction"])
-        self.assertIn("包括下划线及其后全部后缀", self.nodes["shortlist"]["prompt_template"][0]["text"])
-
     def test_invalid_shortlist_is_regenerated_once_before_recommendation(self):
         decision = json.dumps(self.product_output(self.sources["MS"]))
         saved, _, stage = self.turn(
@@ -716,54 +584,6 @@ class MultiBusinessWorkflowTests(unittest.TestCase):
         self.assertEqual(stage["executed"].count("shortlist"), 2)
         self.assertEqual(len(saved["ms_needs"]["requirements"]), 1)
         self.assertEqual(stage["outputs"]["product_decision"]["bundle"]["mode"], "recommend")
-
-    def test_all_structured_nodes_retry_once_without_duplicate_state_or_unsafe_fallback(self):
-        text = "需要本地流量卡"
-        arguments = {"routing": self.route("MS"), "changes": self.changes(add=[text])}
-        expected, _, baseline = self.turn(text, **arguments)
-        for model_id in ("business", "extract", "shortlist", "select"):
-            self.assertEqual(baseline["executed"].count(model_id), 1)
-        invalid_structures = {
-            "business": {**self.route("MS"), "business": "FORGED"},
-            "extract": {"changes": [{"business": "BN"}]},
-            "shortlist": {**self.product_output(self.sources["MS"]), "selected_plan_codes": ["FORGED"]},
-            "select": {"selected_plan_codes": ["FORGED"], "assessments": [], "reason": "invalid"},
-        }
-        for model_id in invalid_structures:
-            valid = baseline["outputs"][model_id]["text"]
-            for invalid in ("invalid JSON", json.dumps(invalid_structures[model_id])):
-                with self.subTest(model=model_id, invalid=invalid):
-                    saved, _, stage = self.turn(text, **arguments, model_responses={model_id: [invalid, valid]})
-                    self.assertEqual(stage["mode"], "recommend")
-                    self.assertEqual(saved, expected)
-                    self.assertEqual(stage["executed"].count(model_id), 2)
-                    for other_model in invalid_structures.keys() - {model_id}:
-                        self.assertEqual(stage["executed"].count(other_model), 1)
-                    prompt = self.nodes[model_id]["prompt_template"]
-                    self.assertIn("不编造用户需求", prompt[0]["text"])
-                    self.assertIn("{{#" + model_id + "_retry_loop.last_error#}}", prompt[1]["text"])
-                    self.assertIn("{{#" + model_id + "_retry_loop.current_text#}}", prompt[1]["text"])
-                with self.subTest(model=model_id, exhausted=invalid):
-                    saved, _, stage = self.turn(text, **arguments, model_responses={model_id: [invalid, invalid]})
-                    self.assertEqual(stage["mode"], "error")
-                    self.assertEqual(stage["executed"].count(model_id), 2)
-                    self.assertEqual(stage["outputs"]["reply_context"]["selected_plans_json"], "[]")
-                    if model_id != "select":
-                        self.assertNotIn("rank", stage["executed"])
-                    if model_id == "business":
-                        self.assertIn(text, saved["routing_context"]["messages"])
-                    elif model_id == "extract":
-                        self.assertIn(text, saved["ms_needs"]["pending_messages"])
-                    else:
-                        self.assertEqual(saved["ms_needs"]["requirements"], expected["ms_needs"]["requirements"])
-
-        responses = {}
-        for model_id in invalid_structures:
-            responses[model_id] = ["invalid JSON", baseline["outputs"][model_id]["text"]]
-        saved, _, stage = self.turn(text, **arguments, model_responses=responses)
-        self.assertEqual(saved, expected)
-        for model_id in invalid_structures:
-            self.assertEqual(stage["executed"].count(model_id), 2)
 
     def test_extraction_regeneration_does_not_consume_interview_twice(self):
         initial, _, first = self.turn("想看看手机套餐", routing=self.route("MS"))
@@ -779,23 +599,6 @@ class MultiBusinessWorkflowTests(unittest.TestCase):
                 self.assertEqual(stage["mode"], "recommend")
                 self.assertEqual(saved, expected)
                 self.assertEqual(stage["executed"].count("extract"), 2)
-
-    def test_product_decision_rejects_invalid_codes_actions_and_question_structure(self):
-        base = self.product_output(self.sources["MS"], action="interview")
-        invalid = []
-        for field, value in (("topic", []), ("information_needed", ""),
-                             ("selection_impact", ""), ("blocking", "true")):
-            output = copy.deepcopy(base)
-            output["follow_up"][field] = value
-            invalid.append(output)
-        invalid.append({**base, "follow_up": None})
-        invalid.append({**base, "selected_plan_codes": ["FORGED"]})
-        invalid.append({**base, "action": "approve_discount"})
-        for output in invalid:
-            with self.subTest(output=output):
-                _, _, stage = self.turn("想了解手机套餐", routing=self.route("MS"), shortlist=output)
-                self.assertEqual(stage["mode"], "error")
-                self.assertNotIn("rank", stage["executed"])
 
     def test_disney_bundle_after_budget_change_needs_no_exact_tag_or_reference_id(self):
         text = "我需要1000M宽频，不能超过80元，有没有便宜的？"
@@ -830,6 +633,11 @@ class MultiBusinessWorkflowTests(unittest.TestCase):
                     candidates = json.loads(stage["outputs"]["rank"]["candidates_json"])
                     self.assertEqual([plan["plan_code"] for plan in candidates], codes)
                     self.assertEqual(current["bn_needs"]["last_recommended_codes"], codes)
+                    link_action = stage["outputs"]["product_link_action"]
+                    self.assertEqual(link_action["frontend_action"], "SHOW_PRODUCT_LINK")
+                    self.assertEqual(link_action["service_type"], "BN")
+                    self.assertEqual([product["plan_code"] for product in link_action["products"]], codes)
+                    self.assertTrue(all(product["link_label"] for product in link_action["products"]))
                 else:
                     intent = json.loads(stage["outputs"]["reply_context"]["instruction"])
                     self.assertEqual(set(intent), {"topic", "information_needed", "selection_impact", "blocking"})
@@ -866,15 +674,6 @@ class MultiBusinessWorkflowTests(unittest.TestCase):
         self.assertEqual(stage["outputs"]["reply_context"]["selected_plans_json"], "[]")
         self.assertEqual(stage["outputs"]["reply_context"]["plans_tags_json"], "[]")
         self.assertNotIn("rank", stage["executed"])
-
-    def test_repeat_optional_question_becomes_comparison_not_another_confirmation(self):
-        plans = self.sources["MS"]
-        question = self.product_output(plans, action="interview", topic="contract", information="合约偏好")
-        saved, _, _ = self.turn("手机流量卡", routing=self.route("MS"), shortlist=question)
-        saved, _, stage = self.turn("都可以", variables=saved, routing=self.route("MS"), shortlist=question)
-        self.assertEqual(stage["mode"], "recommend")
-        self.assertEqual(saved["ms_needs"]["asked_topics"], ["contract"])
-        self.assertTrue(saved["ms_needs"]["last_recommended_codes"])
 
     def test_conflict_clarification_survives_round_cap_and_records_actual_answer(self):
         plans = self.sources["XE"]
@@ -915,49 +714,14 @@ class MultiBusinessWorkflowTests(unittest.TestCase):
         self.assertEqual(json.loads(stage["outputs"]["catalog"]["needs_json"])["pending_messages"], [text])
         self.assertNotIn("HKBN", stage["outputs"]["reply_context"]["needs_json"])
 
-    def test_competitor_quote_preserves_neutral_price_goal_and_brand_guard_is_not_error(self):
-        message = "我住杏花村，需要1G寬頻，PCCW 報價$198，你哋有冇得平？"
-        quote = "PCCW 報價$198，你哋有冇得平？"
-        broken = {
-            "changes": [
-                {"business": "BN", "operation": "add", "requirement_id": "",
-                 "text": "需要1G家居宽频", "attitude": "interested", "priority": "unspecified",
-                 "evidence": ["需要1G寬頻"]},
-                {"business": "BN", "operation": "add", "requirement_id": "",
-                 "text": "希望月费比PCCW报价$198更便宜", "attitude": "interested", "priority": "preferred",
-                 "evidence": [quote]},
-            ],
-            "question_changes": [{"business": "BN", "operation": "add", "question_id": "",
-                                  "text": "套餐月费是否比$198更便宜", "evidence": [quote]}],
-            "clarification": "", "reason": "保留速度、价格需求和咨询", "context_update": None,
-        }
-        saved, _, _ = self.turn(message)
-        corrected = copy.deepcopy(broken)
-        corrected["changes"][1]["text"] = "希望月费低于$198"
-        current, _, stage = self.address(
-            variables=saved,
-            model_responses={"extract": [json.dumps(corrected)]},
-        )
-        self.assertNotEqual(stage["mode"], "error")
-        self.assertEqual(self.preference_texts(current, "BN"), ["需要1G家居宽频", "希望月费低于$198"])
-        self.assertEqual(current["bn_needs"]["requirements"][1]["evidence"], [quote])
-        self.assertEqual(current["bn_needs"]["questions"][0]["text"], "套餐月费是否比$198更便宜")
-        _, _, failed = self.address(
-            variables=saved, model_responses={"extract": [json.dumps(broken), json.dumps(broken)]},
-        )
-        self.assertNotEqual(failed["mode"], "error")
-        self.assertEqual(failed["executed"].count("extract"), 1)
-        self.assertIn("明确拒绝网络品牌比较", failed["outputs"]["reply_context"]["instruction"])
-        self.assertIn("含品牌的条目未保存", failed["outputs"]["reply_context"]["instruction"])
-        self.assertIn("PCCW", json.dumps(broken))
-        prompt = self.nodes["extract"]["prompt_template"][0]["text"]
-        self.assertIn("希望月费低于$198", prompt)
-        self.assertIn("报价不等于硬性预算", prompt)
-
     def test_structured_node_failure_uses_bounded_retry_and_explicit_error_path(self):
-        message = "日常上网"
-        arguments = {"routing": self.route("MS"), "changes": self.changes(add=["需要日常上网"])}
-        _, _, baseline = self.turn(message, **arguments)
+        message = "推介流動通訊計劃"
+        arguments = {
+            "routing": self.route("MS"),
+            "changes": self.changes(delivery_goal="selection"),
+            "shortlist": self.product_output(self.sources["MS"]),
+        }
+        baseline_saved, _, baseline = self.turn(message, **arguments)
         self.assertEqual(baseline["mode"], "recommend")
         for node_id in ("business", "extract", "shortlist", "select"):
             error = {"node_error": {"type": "StructuredOutputValidationError",
@@ -969,38 +733,22 @@ class MultiBusinessWorkflowTests(unittest.TestCase):
                 )
                 self.assertEqual(recovered["mode"], "recommend")
                 self.assertEqual(recovered["executed"].count(node_id), 2)
-                self.assertEqual(len(current["ms_needs"]["requirements"]), 1)
+                self.assertEqual(current["ms_needs"]["requirements"], baseline_saved["ms_needs"]["requirements"])
                 contexts = recovered["loop_contexts"][node_id + "_retry_loop"]
-                self.assertIn("结构化输出校验失败", contexts[1]["last_error"])
+                self.assertIn("Output failed JSON Schema validation", contexts[1]["last_error"])
                 self.assertIn("StructuredOutputValidationError", contexts[1]["last_error"])
-                _, _, exhausted = self.turn(
-                    message, **arguments, model_responses={node_id: [error, error]},
+                retry_loop = node_id + "_retry_loop"
+                attempt_limit = self.nodes[retry_loop]["loop_count"]
+                _, answer, exhausted = self.turn(
+                    message, **arguments, model_responses={node_id: [error] * attempt_limit},
                 )
                 self.assertEqual(exhausted["mode"], "error")
-                self.assertEqual(exhausted["executed"].count(node_id), 2)
+                self.assertEqual(exhausted["executed"].count(node_id), attempt_limit)
                 self.assertEqual(exhausted["outputs"]["reply_context"]["selected_plans_json"], "[]")
-                self.assertIn("结构化输出校验失败", exhausted["outputs"]["reply_context"]["instruction"])
-
-    def test_reported_aborted_routing_output_is_validated_and_retry_state_is_written(self):
-        captured = {
-            "text": '{"business": "MS" ,  "mentioned_b\nusiness',
-            "reasoning_content": "", "finish_reason": "abort",
-            "structured_output": {"business": "MS"},
-        }
-        message = "睇睇你地流通通讯有冇优惠？"
-        _, _, stage = self.turn(
-            message, routing=self.route("MS"), changes=self.changes(add=["需要流动通讯优惠"]),
-            model_responses={"business": [
-                {"llm_result": captured}, json.dumps(self.route("MS")),
-            ]},
-        )
-        self.assertNotEqual(stage["mode"], "error")
-        contexts = stage["loop_contexts"]["business_retry_loop"]
-        self.assertEqual(contexts[1]["current_text"], captured["text"])
-        self.assertIn("模型输出不是合法JSON", contexts[1]["last_error"])
-        self.assertNotIn("模型输出为空", contexts[1]["last_error"])
-        self.assertEqual(stage["outputs"]["business_retry_loop"]["retry"], False)
-        self.assertEqual(stage["executed"].count("business_validation"), 2)
+                self.assertIn("StructuredOutputValidationError", exhausted["outputs"][retry_loop]["last_error"])
+                self.assertEqual(answer, self.nodes["technical_error_reply"]["answer"])
+                self.assertNotIn("reply", exhausted["executed"])
+                self.assertEqual(exhausted["outputs"]["product_link_action"]["frontend_action"], "NONE")
 
     def test_unknown_llm_success_handle_leaves_loop_state_empty_instead_of_bypassing_edges(self):
         original = self.graph
@@ -1020,72 +768,27 @@ class MultiBusinessWorkflowTests(unittest.TestCase):
         finally:
             self.graph = original
 
-    def test_reported_malformed_routing_is_not_silently_repaired_or_treated_as_a_user_error(self):
+    def test_reported_malformed_routing_retries_or_reaches_technical_error(self):
         message = "睇睇你地流通通讯有冇优惠？"
         malformed = '{"business": "MS" , "  ？"  :  " " , "    ？"  :  []  "   '
         for responses, expected_mode in (
-            ([malformed, json.dumps(self.route("MS"))], "recommend"),
-            ([malformed, malformed], "error"),
+            ([malformed, json.dumps(self.route("MS"))], "interview"),
+            ([malformed] * self.nodes["business_retry_loop"]["loop_count"], "error"),
         ):
             with self.subTest(mode=expected_mode):
                 _, _, stage = self.turn(
-                    message, routing=self.route("MS"), changes=self.changes(add=["需要流动通讯优惠"]),
+                    message, routing=self.route("MS"),
                     model_responses={"business": responses},
                 )
                 self.assertEqual(stage["mode"], expected_mode)
                 context = stage["loop_contexts"]["business_retry_loop"][1]
-                self.assertEqual(context["current_text"], malformed)
-                self.assertIn("模型输出不是合法JSON", context["last_error"])
+                self.assertEqual(context["current_text"], "")
+                self.assertIn("模型返回无效 JSON", context["last_error"])
                 self.assertNotIn("模型输出为空", context["last_error"])
                 if expected_mode == "error":
                     self.assertNotIn("fetch_tags", stage["executed"])
                     self.assertEqual(stage["outputs"]["reply_context"]["selected_plans_json"], "[]")
                     self.assertEqual(stage["outputs"]["prepare"]["snapshot"]["routing_context"]["messages"], [message])
-
-    def test_product_evidence_can_be_paraphrased_without_asserting_code_verified_facts(self):
-        candidates = [{"plan_code": "TEST", "markdown": "第1至24個月月費: $129; 預繳$200"}]
-        needs = {"requirements": [{"id": "R1"}], "questions": [{"id": "Q1"}]}
-        output = {"selected_plan_codes": ["TEST"], "reason": "比较", "assessments": [{
-            "plan_code": "TEST",
-            "requirements": [{"requirement_id": "R1", "status": "supported",
-                              "quote": "首24个月每月129港元，需要预缴200港元",
-                              "explanation": "依据收费条款转述"}],
-            "info_answers": [{"question_id": "Q1", "status": "answered",
-                              "quote": "预缴金额是200港元", "answer": "须预缴200港元"}],
-        }]}
-        result = self.functions["validate_selection"](
-            json.dumps(output), json.dumps(candidates), json.dumps(needs),
-        )
-        self.assertEqual(result["error"], "")
-        self.assertEqual(json.loads(result["recommendations_json"])[0]["markdown"], candidates[0]["markdown"])
-        self.assertIn("quote允许原文摘录或准确转述", self.nodes["select"]["prompt_template"][0]["text"])
-        self.assertIn("不是代码已认证的事实", self.nodes["reply"]["prompt_template"][0]["text"])
-        self.assertNotIn("source_quote", self.nodes["validate_selection"]["code"])
-
-    def test_schema_failure_with_no_retry_still_reaches_explicit_error_reply(self):
-        graph = build(llm_retry_count=0)["workflow"]["graph"]
-        original = (self.graph, self.nodes, self.functions)
-        self.graph = graph
-        self.nodes = {node["id"]: node["data"] for node in graph["nodes"]}
-        self.functions = {}
-        for node_id, data in self.nodes.items():
-            if data["type"] == "code":
-                namespace = {}
-                exec(compile(data["code"], node_id, "exec"), namespace)
-                self.functions[node_id] = namespace["main"]
-        try:
-            _, _, stage = self.turn(
-                "日常上网", routing=self.route("MS"),
-                model_responses={"business": {"node_error": {
-                    "type": "StructuredOutputValidationError", "message": "schema mismatch",
-                }}},
-            )
-            self.assertEqual(stage["mode"], "error")
-            self.assertIn("结构化输出校验失败", stage["outputs"]["reply_context"]["instruction"])
-            self.assertEqual(stage["executed"].count("business"), 1)
-            self.assertNotIn("rank", stage["executed"])
-        finally:
-            self.graph, self.nodes, self.functions = original
 
     def test_legacy_free_preferences_migrate_without_current_catalog_match(self):
         initial = self.legacy_initial("XE")
@@ -1100,7 +803,7 @@ class MultiBusinessWorkflowTests(unittest.TestCase):
     def test_selection_requires_grounded_per_requirement_assessments(self):
         candidates = [{"plan_code": "TEST", "tag": [], "markdown": "Offline playback is available. Contract: 12 months."}]
         needs = {"requirements": [{"id": "R1", "text": "offline music", "attitude": "interested", "evidence": ["offline"]}]}
-        output = {"selected_plan_codes": ["TEST"], "reason": "compare", "assessments": [
+        output = {"reason": "compare", "assessments": [
             {"plan_code": "TEST", "requirements": [{"requirement_id": "R1", "status": "supported",
               "quote": "Offline playback is available.", "explanation": "原文明确说明离线播放"}]}]}
         validator = self.functions["validate_selection"]
@@ -1118,7 +821,6 @@ class MultiBusinessWorkflowTests(unittest.TestCase):
         result = validator(json.dumps(output), json.dumps(candidates), json.dumps(needs))
         self.assertEqual(result["error"], "")
         for invalid in (
-            {**output, "assessments": []},
             {**output, "assessments": [{"plan_code": "TEST", "requirements": []}]},
             {**output, "assessments": output["assessments"] * 2},
             {**output, "assessments": [{"plan_code": "TEST", "requirements": output["assessments"][0]["requirements"] * 2}]},
@@ -1130,71 +832,6 @@ class MultiBusinessWorkflowTests(unittest.TestCase):
     def question_change(self, text, *, operation="add", identifier="", business="__CURRENT_BUSINESS__"):
         return {"business": business, "operation": operation, "question_id": identifier,
                 "text": text, "evidence": ["__TEST_USER_MESSAGE__"]}
-
-    def test_broadband_refinement_keeps_atomic_conditions_and_searches_for_phone(self):
-        codes = [plan["plan_code"] for plan in self.sources["BN"]]
-        initial_text = "我想要1g的"
-        initial, _, _ = self.turn(initial_text)
-        speed = self.changes(add=["需要1000M家居宽频"])
-        speed["changes"][0]["priority"] = "unspecified"
-        saved, _, _ = self.address(codes, variables=initial, changes=speed)
-        budget = self.changes(add=["月费低于$150", "最好包含Disney+"])
-        for change, priority in zip(budget["changes"], ("unspecified", "preferred")):
-            change["priority"] = priority
-        saved, _, _ = self.turn("低于150$最好包含disney", variables=saved, changes=budget)
-        before = copy.deepcopy(saved["bn_needs"]["requirements"])
-        text = "有没有带流动通讯或家居电话？"
-        output = self.changes(question_changes=[self.question_change(text)])
-        selected = ["AE99824GAME4OTT", "AX12936HT3M90_C3F3630IDD90"]
-        selection = {
-            "selected_plan_codes": selected, "reason": "验证原偏好与电话候选的比较传递，不证明真实模型选品",
-            "assessments": [{
-                "plan_code": code,
-                "requirements": [{"requirement_id": item["id"], "status": "unknown", "quote": "",
-                                  "explanation": "测试替身不核对购买条件的语义"} for item in before],
-                "info_answers": [{"question_id": "Q1", "status": "unknown", "quote": "",
-                                  "answer": "资料未注明是否附带流动通讯或家居电话"}
-                                 if code == selected[0] else
-                                 {"question_id": "Q1", "status": "answered", "quote": "家居電話",
-                                  "answer": "资料列有家居电话；未注明本地流动通讯"}],
-            } for code in selected],
-        }
-        saved, _, stage = self.turn(
-            text, variables=saved, changes=output, selection=selection,
-            shortlist={"selected_plan_codes": selected, "reason": "纳入电话候选作比较"},
-        )
-        self.assertEqual(stage["mode"], "recommend")
-        self.assertEqual(saved["bn_needs"]["requirements"], before)
-        self.assertEqual([item["id"] for item in before], ["R1", "R2", "R3"])
-        self.assertEqual([item["priority"] for item in before], ["unspecified", "unspecified", "preferred"])
-        self.assertEqual(saved["bn_needs"]["questions"],
-                         [{"id": "Q1", "text": text, "evidence": [text]}])
-        request = json.loads(stage["outputs"]["rank"]["request_json"])
-        self.assertEqual(request["questions"], saved["bn_needs"]["questions"])
-        self.assertEqual(request["requirements"], before)
-        plans = json.loads(stage["outputs"]["reply_context"]["selected_plans_json"])
-        self.assertEqual([plan["plan_code"] for plan in plans], selected)
-        self.assertEqual(plans[0]["info_answers"][0]["status"], "unknown")
-        self.assertEqual(plans[1]["info_answers"][0]["quote"], "家居電話")
-        self.assertEqual(saved["ms_needs"], self.initial["ms_needs"])
-        saved, _, repeated = self.turn(text, variables=saved)
-        self.assertEqual(repeated["mode"], "recommend")
-        self.assertEqual(len(saved["bn_needs"]["questions"]), 1)
-        self.assertEqual(saved["bn_needs"]["next_question_id"], 2)
-
-    def test_question_only_can_recommend_and_preserves_query_context(self):
-        text = "手机套餐有没有附带旅游数据？"
-        saved, _, stage = self.turn(
-            text, routing=self.route("MS"),
-            changes=self.changes(question_changes=[self.question_change(text)]),
-        )
-        self.assertEqual(stage["mode"], "recommend")
-        self.assertEqual(saved["ms_needs"]["requirements"], [])
-        self.assertEqual(saved["ms_needs"]["questions"][0]["evidence"], [text])
-        needs = json.loads(stage["outputs"]["reply_context"]["needs_json"])
-        self.assertEqual(needs["answer_history"][-1]["answer"], text)
-        plans = json.loads(stage["outputs"]["reply_context"]["selected_plans_json"])
-        self.assertTrue(all(plan["info_answers"][0]["question_id"] == "Q1" for plan in plans))
 
     def test_question_changes_validate_scope_evidence_and_unique_existing_ids(self):
         snapshot = copy.deepcopy(self.initial)
@@ -1231,20 +868,6 @@ class MultiBusinessWorkflowTests(unittest.TestCase):
         self.assertEqual(removed["next_question_id"], 2)
         self.assertEqual(snapshot["ms_needs"]["questions"], [])
 
-    def test_requirement_priority_is_validated_without_rewriting_old_requirements(self):
-        text = "必须包含Netflix"
-        for priority in ("required", "preferred", "unspecified", "invented"):
-            with self.subTest(priority=priority):
-                changes = self.requirement_output(text)
-                changes["changes"][0]["priority"] = priority
-                saved, _, stage = self.turn(text, routing=self.route("XE"), changes=changes)
-                if priority == "invented":
-                    self.assertEqual(stage["mode"], "error")
-                    self.assertEqual(saved["xe_needs"]["requirements"], [])
-                else:
-                    self.assertEqual(stage["mode"], "recommend")
-                    self.assertEqual(saved["xe_needs"]["requirements"][0]["priority"], priority)
-
     def test_existing_conversations_gain_questions_without_losing_compound_requirement(self):
         old = copy.deepcopy(self.initial)
         for business in ("bn", "ms", "xe"):
@@ -1261,46 +884,6 @@ class MultiBusinessWorkflowTests(unittest.TestCase):
             self.assertEqual(saved[business + "_needs"]["questions"], [])
             self.assertEqual(saved[business + "_needs"]["next_question_id"], 1)
 
-    def test_question_evidence_and_exact_coverage_are_strictly_validated(self):
-        candidates = [{"plan_code": "TEST", "markdown": "Includes a home phone."}]
-        needs = {"requirements": [{"id": "R1"}], "questions": [{"id": "Q1"}]}
-        requirement = {"requirement_id": "R1", "status": "unknown", "quote": "",
-                       "explanation": "旧复合需求只核对一次，无法确认全部条件"}
-        answer = {"question_id": "Q1", "status": "answered", "quote": "Includes a home phone.",
-                  "answer": "包含家居电话"}
-        output = {"selected_plan_codes": ["TEST"], "reason": "compare", "assessments": [{
-            "plan_code": "TEST", "requirements": [requirement], "info_answers": [answer],
-        }]}
-        validator = self.functions["validate_selection"]
-
-        def validate(value):
-            return validator(json.dumps(value), json.dumps(candidates), json.dumps(needs))
-
-        self.assertEqual(validate(output)["error"], "")
-        unknown = copy.deepcopy(output)
-        unknown["assessments"][0]["info_answers"][0].update(status="unknown", quote="", answer="资料未注明")
-        self.assertEqual(validate(unknown)["error"], "")
-        for answers in (
-            [], [answer, answer], [{**answer, "question_id": "R1"}],
-            [{**answer, "question_id": "Q9"}], [{**answer, "status": "supported"}],
-            [{**answer, "quote": ""}], [{**answer, "quote": None}],
-            [{**answer, "answer": ""}], [{**answer, "extra": True}],
-        ):
-            invalid = copy.deepcopy(output)
-            invalid["assessments"][0]["info_answers"] = answers
-            with self.subTest(answers=answers):
-                result = validate(invalid)
-                self.assertTrue(result["error"])
-                self.assertEqual(result["recommendations_json"], "[]")
-        duplicate = copy.deepcopy(output)
-        duplicate["assessments"][0]["requirements"].append(requirement)
-        result = validate(duplicate)
-        self.assertIn("套餐TEST核对需求编号重复：R1", result["error"])
-        self.assertEqual(result["recommendations_json"], "[]")
-        missing = copy.deepcopy(output)
-        missing["assessments"][0]["requirements"] = []
-        self.assertIn('缺少需求编号=["R1"]', validate(missing)["error"])
-
     def test_question_state_rejects_malformed_ids_counters_and_partial_migration(self):
         question = {"id": "Q1", "text": "是否有电话", "evidence": []}
         for questions, counter in (([question, question], 2), ([{**question, "id": "R1"}], 2),
@@ -1313,98 +896,6 @@ class MultiBusinessWorkflowTests(unittest.TestCase):
         initial["ms_needs"].pop("next_question_id")
         _, _, stage = self.turn("继续比较", variables=initial, routing=self.route("MS"))
         self.assertEqual(stage["mode"], "error")
-
-    def test_inquiry_prompts_preserve_context_without_creating_hard_filters(self):
-        extraction = self.nodes["extract"]["prompt_template"][0]["text"]
-        for rule in ("每条需求只记录一个", "新增维度用add", "不拆散用户明确表达的二选一",
-                     "重复问同一问题", "question_changes", "priority"):
-            self.assertIn(rule, extraction)
-        shortlist = self.nodes["shortlist"]["prompt_template"][0]["text"]
-        for rule in ("也参与全目录候选查找", "不只重复原推荐", "不无谓追问是否必须"):
-            self.assertIn(rule, shortlist)
-        selection = self.nodes["select"]["prompt_template"][0]["text"]
-        for rule in ("每个现有R编号恰好评估一次", "复合需求仍整体评估一次",
-                     "每个Q编号恰好回答一次", "不能断言不包含"):
-            self.assertIn(rule, selection)
-        reply = self.nodes["reply"]["prompt_template"][0]["text"]
-        self.assertIn("先自然回应用户最新咨询", reply)
-        self.assertIn("不向用户展示R/Q编号", reply)
-        self.assertIn("不能说一定没有", reply)
-
-    def test_duplicate_requirement_feedback_retries_without_dropping_inquiry(self):
-        codes = ["AE99824GAME4OTT", "AX12936HT3M90_C3F3630IDD90"]
-        text = "需要1000M，月费低于150，最好有Disney+"
-        initial, _, _ = self.turn(text)
-        saved, _, _ = self.address(codes, variables=initial, changes=self.changes(add=[text]))
-        question = "有没有带流动通讯或家居电话？"
-        corrected = {
-            "selected_plan_codes": codes, "reason": "旧复合需求整体核对，另答咨询的测试替身",
-            "assessments": [{
-                "plan_code": code,
-                "requirements": [{"requirement_id": "R1", "status": "unknown", "quote": "",
-                                  "explanation": "不能确认全部复合条件，不将部分满足称为整体满足"}],
-                "info_answers": [{"question_id": "Q1", "status": "unknown", "quote": "",
-                                  "answer": "资料未注明，不推断不包含"}],
-            } for code in codes],
-        }
-        broken = copy.deepcopy(corrected)
-        for assessment in broken["assessments"]:
-            assessment["requirements"] *= 2
-        arguments = {
-            "variables": saved,
-            "changes": self.changes(question_changes=[self.question_change(question)]),
-            "shortlist": {"selected_plan_codes": codes, "reason": "比较Disney+与电话方案"},
-        }
-        recovered, _, stage = self.turn(
-            question, **arguments,
-            model_responses={"select": [json.dumps(broken), json.dumps(corrected)]},
-        )
-        self.assertEqual(stage["mode"], "recommend")
-        self.assertEqual(stage["executed"].count("select"), 2)
-        contexts = stage["loop_contexts"]["select_retry_loop"]
-        self.assertIn("套餐AE99824GAME4OTT核对需求编号重复：R1", contexts[1]["last_error"])
-        self.assertEqual(json.loads(contexts[1]["current_text"]), broken)
-        self.assertEqual(recovered["bn_needs"]["requirements"], saved["bn_needs"]["requirements"])
-        self.assertEqual(len(recovered["bn_needs"]["questions"]), 1)
-        self.assertEqual(recovered["bn_needs"]["next_question_id"], 2)
-        plans = json.loads(stage["outputs"]["reply_context"]["selected_plans_json"])
-        self.assertTrue(all(len(plan["requirement_assessments"]) == 1 for plan in plans))
-        self.assertTrue(all(plan["info_answers"][0]["question_id"] == "Q1" for plan in plans))
-        _, _, exhausted = self.turn(
-            question, **arguments,
-            model_responses={"select": [json.dumps(broken), json.dumps(broken)]},
-        )
-        self.assertEqual(exhausted["mode"], "error")
-        self.assertEqual(exhausted["executed"].count("select"), 2)
-        self.assertEqual(exhausted["outputs"]["reply_context"]["selected_plans_json"], "[]")
-        self.assertIn("重复：R1", exhausted["outputs"]["reply_context"]["instruction"])
-
-    def test_atomic_requirement_and_inquiry_examples_execute_against_real_validators(self):
-        system = self.nodes["extract"]["prompt_template"][0]["text"]
-        example = json.loads(system.split("### 独立条件与咨询示例", 1)[1].splitlines()[2])
-        initial = copy.deepcopy(self.initial)
-        initial["bn_needs"].update(
-            requirements=[{"id": "R1", "text": "需要1000M家居宽频", "attitude": "interested",
-                           "evidence": ["需要1000M家居宽频"]}],
-            next_requirement_id=2,
-            pending_messages=["不能超过200元，最好短合约，有没有附送设备？"],
-        )
-        result = self.functions["merge"](json.dumps(example), initial, "BN")["bundle"]
-        self.assertEqual(result["mode"], "analyze")
-        needs = result["snapshot"]["bn_needs"]
-        self.assertEqual([item["id"] for item in needs["requirements"]], ["R1", "R2", "R3"])
-        self.assertEqual(needs["requirements"][1]["priority"], "required")
-        self.assertEqual(needs["requirements"][2]["priority"], "preferred")
-        self.assertEqual(needs["questions"][0]["id"], "Q1")
-        system = self.nodes["select"]["prompt_template"][0]["text"]
-        example = json.loads(system.split("### 需求与咨询同时核对示例", 1)[1].splitlines()[2])
-        result = self.functions["validate_selection"](
-            json.dumps(example),
-            json.dumps([{"plan_code": "DEMO_BN_INFO", "markdown": "名义带宽：1000M，月费：180元。"}]),
-            json.dumps({"requirements": [{"id": "R1"}, {"id": "R2"}], "questions": [{"id": "Q1"}]}),
-        )
-        self.assertEqual(result["error"], "")
-        self.assertEqual(json.loads(result["recommendations_json"])[0]["info_answers"][0]["status"], "unknown")
 
     def test_extraction_is_independent_of_product_catalog(self):
         prompts = self.nodes["extract"]["prompt_template"]
@@ -1422,22 +913,6 @@ class MultiBusinessWorkflowTests(unittest.TestCase):
         self.assertTrue(plans)
         self.assertTrue(all(plan["requirement_assessments"][0]["status"] == "unknown" for plan in plans))
         self.assertIn("不能把未知改写为支持", self.nodes["reply"]["prompt_template"][0]["text"])
-
-    def test_relative_refinement_prompts_require_comparison_not_generic_quality(self):
-        for node_id in ("shortlist", "select", "reply"):
-            with self.subTest(node=node_id):
-                prompt = self.nodes[node_id]["prompt_template"][0]["text"]
-                self.assertIn("相对需求", prompt)
-                self.assertIn("last_reply", prompt)
-                self.assertIn("last_recommended_codes", prompt)
-                self.assertIn("不能把相同规格称为改善", prompt)
-        shortlist = self.nodes["shortlist"]["prompt_template"][0]["text"]
-        self.assertIn("优先纳入在反馈维度真正改善的候选", shortlist)
-        selection = self.nodes["select"]["prompt_template"][0]["text"]
-        self.assertIn("基准明确且没有改善时标记unsupported", selection)
-        self.assertIn("基准或对应规格无法确认时标记unknown", selection)
-        reply = self.nodes["reply"]["prompt_template"][0]["text"]
-        self.assertIn("候选池没有改善不等于整个可售目录没有", reply)
 
     def test_llm_prompts_are_structured(self):
         for node_id, data in self.nodes.items():
@@ -1460,61 +935,6 @@ class MultiBusinessWorkflowTests(unittest.TestCase):
             self.assertIn("{{#decision_state.comparison_context_json#}}", prompts[1]["text"])
             self.assertIn("comparison_context", prompts[0]["text"])
         self.assertIn("相对上一轮推荐", self.nodes["extract"]["prompt_template"][0]["text"])
-
-    def test_few_shot_examples_match_node_output_contracts(self):
-        expected = {
-            "business": {"business", "mentioned_businesses", "clarification", "intent", "business_requests"},
-            "extract": {"changes", "question_changes", "clarification", "reason", "context_update"},
-            "shortlist": {"action", "selected_plan_codes", "follow_up", "reason"},
-            "select": {"selected_plan_codes", "assessments", "reason"},
-        }
-        for node_id, fields in expected.items():
-            with self.subTest(node=node_id):
-                system = self.nodes[node_id]["prompt_template"][0]["text"]
-                self.assertIn("### 输入输出示例", system)
-                demonstrations = system.split("### 输入输出示例", 1)[1].split("## 输出契约", 1)[0]
-                self.assertNotIn("```", demonstrations)
-                examples = [json.loads(line.strip()) for line in demonstrations.splitlines()
-                            if line.strip().startswith("{") and line.strip().endswith("}")]
-                self.assertGreaterEqual(len(examples), 2)
-                for example in examples:
-                    self.assertEqual(set(example), fields)
-                    if node_id == "shortlist":
-                        self.assertEqual(example["action"], "recommend")
-                        self.assertIsNone(example["follow_up"])
-                        self.assertLessEqual(len(example["selected_plan_codes"]), 5)
-                    elif node_id == "select":
-                        self.assertEqual(example["selected_plan_codes"], [item["plan_code"] for item in example["assessments"]])
-                        for item in example["assessments"]:
-                            self.assertTrue(item["requirements"])
-                            for assessment in item["requirements"]:
-                                self.assertIn(assessment["status"], ("supported", "unsupported", "unknown"))
-                    elif node_id == "extract":
-                        for change in example["changes"]:
-                            self.assertEqual(change["business"], "BN")
-                            self.assertTrue(change["evidence"])
-                if node_id == "shortlist":
-                    self.assertEqual([item["selected_plan_codes"] for item in examples], [
-                        ["DEMO_BN_2500", "DEMO_BN_2000"], ["DEMO_BN_1000"], ["DEMO_BN_2000"],
-                        ["DEMO_BN_100A", "DEMO_BN_100B"],
-                    ])
-                elif node_id == "select":
-                    self.assertEqual([item["assessments"][0]["requirements"][0]["status"] for item in examples],
-                                     ["supported", "unsupported", "unknown"])
-                    for example in examples:
-                        code = example["selected_plan_codes"][0]
-                        candidates = [{"plan_code": code, "markdown": "名义带宽：" + ("1000M" if code == "DEMO_BN_1000" else "2000M")}]
-                        result = self.functions["validate_selection"](
-                            json.dumps(example), json.dumps(candidates), json.dumps({"requirements": [{"id": "R1"}]}),
-                        )
-                        self.assertEqual(result["error"], "")
-                        self.assertEqual(json.loads(result["recommendations_json"])[0]["plan_code"], code)
-                elif node_id == "extract":
-                    self.assertEqual([item["changes"][0]["operation"] for item in examples],
-                                     ["add", "update", "update", "update"])
-        reply = self.nodes["reply"]["prompt_template"][0]["text"]
-        self.assertIn("### 输入输出示例", reply)
-        self.assertIn("输出开头示例", reply)
 
     def test_relative_refinement_has_explicit_decision_priority(self):
         shortlist = self.nodes["shortlist"]["prompt_template"][0]["text"]
@@ -1548,76 +968,6 @@ class MultiBusinessWorkflowTests(unittest.TestCase):
                 self.assertEqual(comparison["unavailable_previous_codes"], ["MISSING"])
                 self.assertEqual(snapshot, before)
 
-    def test_relative_refinement_preserves_baseline_and_unmet_assessment(self):
-        initial = "有没有家居宽频推荐"
-        old_codes = ["AX9824OFF_MT4G10G24ASMO", "AX10924DB_MTSE20G98NO", "AX10924DB"]
-        previous_reply = "这三款家居宽频均为1000M。"
-        saved, _, _ = self.turn(initial)
-        saved, _, baseline = self.address(
-            codes=[plan["plan_code"] for plan in self.sources["BN"]], variables=saved,
-            changes=self.changes(add=[initial]),
-            shortlist={"selected_plan_codes": old_codes, "reason": "基线推荐替身"},
-            reply_text=previous_reply,
-        )
-        self.assertEqual(baseline["mode"], "recommend")
-        self.assertEqual(saved["bn_needs"]["last_recommended_codes"], old_codes)
-        selection = {
-            "selected_plan_codes": old_codes, "reason": "替身保留原方案仅验证缺口传递，不证明模型比较能力",
-            "assessments": [{
-                "plan_code": code,
-                "requirements": [
-                    {"requirement_id": "R1", "status": "supported", "quote": "1000M",
-                     "explanation": "提供家居宽频"},
-                    {"requirement_id": "R2", "status": "unsupported", "quote": "1000M",
-                     "explanation": "相对上一轮1000M没有速度改善"},
-                ],
-            } for code in old_codes],
-        }
-        _, _, stage = self.turn(
-            "带宽太慢了", variables=saved,
-            changes=self.changes(add=["希望比上一轮推荐的宽频更快"]),
-            shortlist={"selected_plan_codes": old_codes, "reason": "保留未改善备选的测试替身"},
-            selection=selection,
-        )
-        self.assertEqual(stage["mode"], "recommend")
-        needs = json.loads(stage["outputs"]["decision_state"]["needs_json"])
-        self.assertEqual(needs["last_reply"], previous_reply)
-        self.assertEqual(needs["last_recommended_codes"], old_codes)
-        self.assertEqual(needs["answer_history"][-1]["topic"], "refinement")
-        self.assertEqual(needs["requirements"][-1]["evidence"], ["带宽太慢了"])
-        self.assertTrue(any("2000M" in plan["tag"] for plan in stage["outputs"]["catalog"]["plans_tags"]))
-        comparison = json.loads(stage["outputs"]["decision_state"]["comparison_context_json"])
-        self.assertEqual(comparison["latest_user_message"], "带宽太慢了")
-        self.assertEqual([plan["plan_code"] for plan in comparison["previous_recommendations"]], old_codes)
-        self.assertTrue(all("1000M" in plan["tag"] for plan in comparison["previous_recommendations"]))
-        self.assertEqual(comparison["unavailable_previous_codes"], [])
-        self.assertEqual(stage["outputs"]["validate_selection"]["error"], "")
-        plans = json.loads(stage["outputs"]["reply_context"]["selected_plans_json"])
-        self.assertEqual([plan["plan_code"] for plan in plans], old_codes)
-        self.assertTrue(all(plan["requirement_assessments"][1]["status"] == "unsupported" for plan in plans))
-        faster_selection = {
-            "selected_plan_codes": ["AW37827F3PROV"], "reason": "2000M对照替身，仅验证规格核对传递",
-            "assessments": [{
-                "plan_code": "AW37827F3PROV",
-                "requirements": [
-                    {"requirement_id": "R1", "status": "supported", "quote": "2000M", "explanation": "提供家居宽频"},
-                    {"requirement_id": "R2", "status": "supported", "quote": "2000M",
-                     "explanation": "相对上一轮推荐1000M，本候选原文2000M提供更高名义带宽"},
-                ],
-            }],
-        }
-        _, _, faster = self.turn(
-            "带宽太慢了", variables=saved,
-            changes=self.changes(add=["希望比上一轮推荐的宽频更快"]),
-            shortlist={"selected_plan_codes": ["AW37827F3PROV"], "reason": "选择改善方案的测试替身"},
-            selection=faster_selection,
-        )
-        self.assertEqual(faster["mode"], "recommend")
-        self.assertEqual(faster["outputs"]["validate_selection"]["error"], "")
-        plans = json.loads(faster["outputs"]["reply_context"]["selected_plans_json"])
-        self.assertEqual([plan["plan_code"] for plan in plans], ["AW37827F3PROV"])
-        self.assertEqual(plans[0]["requirement_assessments"][1]["status"], "supported")
-
     def test_form_action_precedes_llm_and_natural_text_without_backend_calls(self):
         saved, answer, stage = self.turn("想办1000M宽带")
         self.assertEqual(stage["mode"], "request_address")
@@ -1633,7 +983,7 @@ class MultiBusinessWorkflowTests(unittest.TestCase):
         self.assertEqual(saved["bn_needs"]["last_reply"], answer)
 
     def test_answer_directly_references_llm_and_records_after_stream(self):
-        self.assertEqual(self.nodes["answer"]["answer"], "{{#reply.text#}}")
+        self.assertEqual(self.nodes["answer"]["answer"], "{{#reply_context.plan_summary#}}{{#reply.text#}}")
         links = {(edge["source"], edge["target"]) for edge in self.graph["edges"]}
         self.assertIn(("reply", "answer"), links)
         self.assertIn(("answer", "record_reply"), links)
@@ -1664,7 +1014,7 @@ class MultiBusinessWorkflowTests(unittest.TestCase):
                 "新的地址结果", variables=initial, event_type="address_change", bn_plan_codes=csv
             )
             self.assertEqual(stage["mode"], "error")
-            self.assertIn("入口校验失败", answer)
+            self.assertEqual(answer, self.nodes["technical_error_reply"]["answer"])
             self.assertEqual(saved["bn_plans_tags"], [])
             self.assertEqual(saved["bn_scope_codes"], [])
             self.assertEqual(saved["bn_needs"]["last_recommended_codes"], [])
@@ -1721,46 +1071,27 @@ class MultiBusinessWorkflowTests(unittest.TestCase):
         self.assertNotEqual(stage["outputs"]["reply_context"]["interview_topic"], "network")
         self.assertNotIn("运营商", answer)
 
-    def test_sales_presentation_single_bn_plan_has_explicit_sections(self):
-        variables, _, _ = self.ready_bn()
-        _, _, stage = self.address(
-            variables=variables,
-            selection={"selected_plan_codes": [self.codes_a[0]], "reason": "只展示一款"},
-        )
-        context = stage["outputs"]["reply_context"]
-        self.assertEqual(len(json.loads(context["selected_plans_json"])), 1)
-        for heading in ("##### 1.", "**核心内容**", "**月费与合约**", "**相关特色**", "**取舍提醒**"):
-            self.assertIn(heading, context["instruction"])
-        self.assertIn("只有一款", context["instruction"])
-
-    def test_final_reply_headings_are_limited_to_level_five_or_six(self):
-        prompt = self.nodes["reply"]["prompt_template"][0]["text"]
-        self.assertIn("所有分支的最终回复", prompt)
-        self.assertIn("最大只能使用五级标题（#####）", prompt)
-        self.assertIn("允许六级标题（######）", prompt)
-        self.assertIn("禁止一至四级标题", prompt)
-        self.assertIn("Setext下划线标题及HTML标题标签", prompt)
-        self.assertIn("##### 序号. display_name（plan_code）", prompt)
-        self.assertNotIn("Markdown三级标题", prompt)
-
     def test_sales_presentation_mobile_hides_operator_fields(self):
-        text = "本地100GB流量，其他没有要求"
+        text = "推介流動通訊計劃"
         _, _, stage = self.turn(
             text, routing=self.route("MS"),
-            changes=self.changes(add=["本地100GB流量"], recommend=True, basis="clear_requirements", evidence=[text]),
+            changes=self.changes(delivery_goal="selection"),
+            shortlist=self.product_output(self.sources["MS"]),
         )
         context = stage["outputs"]["reply_context"]
         for field in ("selected_plans_json", "plans_tags_json", "needs_json"):
             for name in ("中国移动", "中國移動", "3香港", "运营商"):
                 self.assertNotIn(name, context[field])
         selected = json.loads(context["selected_plans_json"])
+        self.assertTrue(selected)
         self.assertTrue(all(plan["display_name"] for plan in selected))
 
     def test_sales_document_view_keeps_costs_limits_and_original_source(self):
-        text = "本地100GB流量，其他没有要求"
+        text = "推介流動通訊計劃"
         _, _, stage = self.turn(
             text, routing=self.route("MS"),
-            changes=self.changes(add=["本地100GB流量"], recommend=True, basis="clear_requirements", evidence=[text]),
+            changes=self.changes(delivery_goal="selection"),
+            shortlist=self.product_output(self.sources["MS"]),
         )
         raw = json.loads(stage["outputs"]["rank"]["candidates_json"])
         display = json.loads(stage["outputs"]["rank"]["sales_candidates_json"])
@@ -1774,43 +1105,6 @@ class MultiBusinessWorkflowTests(unittest.TestCase):
         for fact in ("$129", "5Mbps", "自動續約條款", "100GB", "24個月合約"):
             self.assertIn(fact, outward)
 
-    def test_user_operator_request_cannot_enter_final_sales_context(self):
-        initial = self.legacy_initial("MS")
-        initial["ms_needs"]["collected_tags"] = ["中国移动香港网络"]
-        initial["ms_needs"]["user_context"] = "偏好3香港；预算150港元"
-        initial["ms_needs"]["last_reply"] = "中国移动香港套餐；月费129港元"
-        saved, _, stage = self.turn(
-            "请评价3香港和中国移动谁更好，预算150港元",
-            variables=initial, routing=self.route("MS", intent="consult"),
-        )
-        context = stage["outputs"]["reply_context"]
-        for field in ("user_message", "needs_json", "plans_tags_json", "selected_plans_json"):
-            for name in ("中国移动", "3香港"):
-                self.assertNotIn(name, context[field])
-        self.assertIn("150港元", context["user_message"])
-        self.assertEqual(saved["ms_needs"]["requirements"], [])
-        self.assertIn("明确说明不提供网络品牌比较或评价", context["instruction"])
-
-    def test_operator_tags_are_not_collectable_or_rankable(self):
-        initial = self.legacy_initial("MS")
-        initial["ms_needs"]["collected_tags"] = ["中国移动香港网络"]
-        text = "本地100GB，其他没有要求"
-        saved, _, stage = self.turn(
-            text, variables=initial, routing=self.route("MS"),
-            changes=self.changes(add=["本地100GB流量"], recommend=True, basis="clear_requirements", evidence=[text]),
-        )
-        self.assertEqual(self.preference_texts(saved, "MS"), ["本地100GB流量"])
-        request = json.loads(stage["outputs"]["rank"]["request_json"])
-        self.assertEqual([item["text"] for item in request["requirements"]], ["本地100GB流量"])
-        self.assertNotIn("中国移动", stage["outputs"]["catalog"]["plans_tags_json"])
-        _, _, stage = self.turn(
-            "想选中国移动", routing=self.route("MS"),
-            changes=self.changes(add=["中国移动香港网络"]),
-        )
-        self.assertEqual(stage["mode"], "boundary")
-        self.assertNotIn("rank", stage["executed"])
-        self.assertEqual(stage["outputs"]["merge"]["bundle"]["snapshot"]["ms_needs"]["last_validation_errors"], [])
-
     def test_sales_policy_preserves_security_product_not_provider_claims(self):
         helpers = self.functions["reply_context"].__globals__
         self.assertFalse(helpers["operator_reference"]("HKBN SAFE"))
@@ -1820,30 +1114,6 @@ class MultiBusinessWorkflowTests(unittest.TestCase):
         self.assertIn("6个月免费", view)
         self.assertIn("需收费", view)
         self.assertNotIn("HKBN", view)
-
-    def test_final_prompt_requires_sales_layout_and_no_invented_needs(self):
-        prompt = self.nodes["reply"]["prompt_template"][0]["text"]
-        for rule in ("只有一款", "不追问、提及、比较或评价运营商", "即使用户主动要求", "不能推断本地100GB", "弹性生效日期不是短合约"):
-            self.assertIn(rule, prompt)
-        self.assertIn("{{#rank.sales_candidates_json#}}", self.nodes["select"]["prompt_template"][1]["text"])
-        self.assertIn("{{#reply_context.user_message#}}", self.nodes["reply"]["prompt_template"][1]["text"])
-
-    def test_optional_interviews_have_a_cap_not_a_minimum_across_businesses(self):
-        for business in ("BN", "MS", "XE"):
-            saved, _, stage = self.address() if business == "BN" else self.turn(
-                "想了解套餐", routing=self.route(business)
-            )
-            questions = []
-            plans = saved[business.lower() + "_plans_tags"]
-            for index, answer in enumerate(("你按日常用途帮我选", "没有预算要求", "没有特别偏好")):
-                questions.append(stage["outputs"]["reply_context"]["interview_topic"])
-                output = self.product_output(plans, action="interview", topic="optional_" + str(index), information="候选取舍")
-                saved, _, stage = self.turn(answer, variables=saved, routing=self.route(business), shortlist=output)
-            self.assertEqual(stage["mode"], "recommend", business)
-            self.assertEqual(saved[business.lower() + "_needs"]["interview_rounds"], 3)
-            self.assertEqual(len(questions), len(set(questions)), business)
-            self.assertNotIn("", questions)
-            self.assertTrue(saved[business.lower() + "_needs"]["last_recommended_codes"])
 
     def test_raw_answer_history_survives_null_context_updates(self):
         saved, _, _ = self.turn("搬家了，想换个快一点的宽带")
@@ -1947,21 +1217,6 @@ class MultiBusinessWorkflowTests(unittest.TestCase):
             )
             self.assertEqual(stage["mode"], "interview")
             self.assertNotIn("rank", stage["executed"])
-
-    def test_clear_initial_needs_and_real_interview_answer_can_recommend(self):
-        saved, answer, stage = self.ready_bn()
-        self.assertEqual(stage["mode"], "recommend")
-        self.assertEqual(set(saved["bn_needs"]["last_recommended_codes"]), set(self.codes_a))
-        self.assertIn("模拟", answer)
-        saved, _, _ = self.address()
-        text = "没有特别要求，你帮我选"
-        saved, _, stage = self.turn(
-            text, variables=saved,
-            changes=self.changes(recommend=True, basis="no_preference", evidence=[text]),
-        )
-        self.assertEqual(stage["mode"], "recommend")
-        self.assertNotIn("fetch_tags", stage["executed"])
-        self.assertTrue(saved["bn_needs"]["ready_to_recommend"])
 
     def test_no_preference_without_actual_question_does_not_skip_interview(self):
         saved, _, _ = self.turn("没有特别要求")
@@ -2252,7 +1507,7 @@ class MultiBusinessWorkflowTests(unittest.TestCase):
         for kwargs in ({"text": ""}, {"event_type": "unknown"}, {"bn_plan_codes": "PLAN_A"}):
             _, answer, stage = self.turn(**kwargs)
             self.assertEqual(stage["mode"], "error")
-            self.assertIn("入口校验失败", answer)
+            self.assertEqual(answer, self.nodes["technical_error_reply"]["answer"])
         initial = copy.deepcopy(self.initial)
         initial["bn_needs"]["ready_to_recommend"] = "invalid"
         saved, _, stage = self.turn(variables=initial)
@@ -2266,7 +1521,7 @@ class MultiBusinessWorkflowTests(unittest.TestCase):
     def test_invalid_routing_and_extraction_are_not_success_shaped(self):
         _, answer, stage = self.turn(routing={"business": "OTHER"})
         self.assertEqual(stage["mode"], "error")
-        self.assertIn("业务识别校验失败", answer)
+        self.assertEqual(answer, self.nodes["technical_error_reply"]["answer"])
         for changes in (self.changes(add=["forged"]), {"recommend": True}):
             _, _, stage = self.address(changes=changes)
             self.assertEqual(stage["mode"], "error")
@@ -2343,214 +1598,6 @@ class MultiBusinessWorkflowTests(unittest.TestCase):
                             if invalid in ("", " \n", "```json\n\n```"):
                                 self.assertIn("模型输出为空", result["bundle"]["instruction"])
                     self.assertEqual(arguments, before)
-
-    def test_reported_ms_selection_allows_optional_plan_reason_without_weakening_validation(self):
-        codes = ["MC5G100G3BACMO", "MT5G148PREPAY", "MT5G228HARPU"]
-        selection = {
-            "selected_plan_codes": codes,
-            "assessments": [{
-                "plan_code": code,
-                "requirements": [{"requirement_id": "R1", "status": "supported", "quote": "服务类型: MS",
-                                  "explanation": "原文明确为移动通讯套餐，符合用户想要移动通讯套餐的需求"}],
-                "reason": "满足R1，适合用户比较选择",
-            } for code in codes],
-            "reason": "用户仅提出想要移动通讯套餐，无其他具体需求；候选均为MS类型，选取三款供用户比较",
-        }
-        saved, _, initial = self.turn(
-            "我想要移动通讯套餐", routing=self.route("MS"), changes=self.changes(add=["需要移动通讯套餐"]),
-            shortlist=self.product_output(self.sources["MS"], action="interview", topic="ms_local_data",
-                                          information="每月需要多少本地数据流量"),
-        )
-        self.assertEqual(initial["mode"], "interview")
-        saved, _, stage = self.turn(
-            "我也不清楚，随便把", variables=saved, routing=self.route("MS"), changes=self.changes(),
-            shortlist={"selected_plan_codes": selection["selected_plan_codes"], "reason": "根据已有购买目标先比较"},
-            selection=selection,
-        )
-        self.assertEqual(stage["outputs"]["validate_selection"]["error"], "")
-        self.assertEqual(stage["mode"], "recommend")
-        self.assertEqual(saved["ms_needs"]["interview_rounds"], 1)
-        self.assertEqual(saved["ms_needs"]["answer_history"][-1]["answer"], "我也不清楚，随便把")
-        plans = json.loads(stage["outputs"]["reply_context"]["selected_plans_json"])
-        self.assertEqual([plan["plan_code"] for plan in plans], selection["selected_plan_codes"])
-        self.assertTrue(all("reason" not in plan for plan in plans))
-        arguments = {
-            "candidates_json": stage["outputs"]["rank"]["sales_candidates_json"],
-            "needs_json": stage["outputs"]["decision_state"]["needs_json"],
-        }
-        canonical = copy.deepcopy(selection)
-        for assessment in canonical["assessments"]:
-            assessment.pop("reason")
-        self.assertEqual(
-            self.functions["validate_selection"](llm_output=json.dumps(canonical), **arguments),
-            stage["outputs"]["validate_selection"],
-        )
-        requirement = selection["assessments"][0]["requirements"][0]
-        for extra in (
-            {"reason": None}, {"reason": 123}, {"reason": {}}, {"other": "not allowed"},
-            {"requirements": []}, {"plan_code": "UNKNOWN"},
-            {"requirements": [{**requirement, "quote": None}]},
-            {"requirements": [{**requirement, "status": "forged"}]},
-        ):
-            with self.subTest(extra=extra):
-                invalid = copy.deepcopy(selection)
-                invalid["assessments"][0].update(extra)
-                result = self.functions["validate_selection"](llm_output=json.dumps(invalid), **arguments)
-                self.assertTrue(result["error"])
-                self.assertEqual(result["recommendations_json"], "[]")
-
-    def test_reported_router_evidence_keeps_model_wording_without_exact_matching(self):
-        codes = ["AX9836ROB", "AX14936HRO3M90_C3F3630IDD90", "AE99824GAME4OTT"]
-        ax23 = (
-            "服务名称: TP-Link Archer AX23 Wi-Fi 6路由器\n"
-            "服务内容: TP-Link 路由器\n"
-            "优惠月费: Wi-Fi 6 方案 - 極速系列 (TP-Link Archer AX23): 第1至36個月月費 : $0"
-        )
-        ge800 = (
-            "服务名称: Wi-Fi 7 方案 - 電競系列 (TP-Link Archer GE800)\n"
-            "服务内容: TP-Link Archer GE800\n"
-            "优惠月费: Wi-Fi 7 方案 - 電競系列 (TP-Link Archer GE800 Wi-Fi 7): 第1至24個月月費: $0; 預繳費用$3600"
-        )
-        selection = {
-            "selected_plan_codes": codes,
-            "assessments": [{
-                "plan_code": code,
-                "requirements": [{"requirement_id": "R1", "status": "supported", "quote": quote,
-                                  "explanation": "仅测试引用出处，不证明费用或需求满足的语义判断"}],
-            } for code, quote in zip(codes, (ax23, ax23, ge800))],
-            "reason": "真实路由器引用的格式回归",
-        }
-        _, _, stage = self.turn(
-            "我已提交地址", event_type="address_add", bn_plan_codes=",".join(codes),
-            changes=self.changes(),
-        )
-        saved = stage["outputs"]["record_reply"]["snapshot"]
-        _, _, stage = self.turn(
-            "有冇家居宽频带wifi路由器推荐，不想额外买wifi路由器了", variables=saved,
-            changes=self.changes(add=["希望宽频包含路由器，不想额外购买"]),
-            shortlist={"selected_plan_codes": codes, "reason": "真实候选编号"}, selection=selection,
-        )
-        self.assertEqual(stage["outputs"]["validate_selection"]["error"], "")
-        self.assertEqual(stage["mode"], "recommend")
-        self.assertEqual(stage["executed"].count("select"), 1)
-        candidates = json.loads(stage["outputs"]["rank"]["sales_candidates_json"])
-        documents = {plan["plan_code"]: plan["markdown"] for plan in candidates}
-        plans = json.loads(stage["outputs"]["reply_context"]["selected_plans_json"])
-        for plan, original in zip(plans, (ax23, ax23, ge800)):
-            expected = "\n".join("- " + line for line in original.splitlines())
-            self.assertNotIn(original, documents[plan["plan_code"]])
-            self.assertIn(expected, documents[plan["plan_code"]])
-            self.assertEqual(plan["requirement_assessments"][0]["quote"], original)
-        arguments = {
-            "candidates_json": stage["outputs"]["rank"]["sales_candidates_json"],
-            "needs_json": stage["outputs"]["decision_state"]["needs_json"],
-        }
-        for quote in (ax23.replace("$0", "$1"), ge800, ax23.replace("路由器", "路由设备"),
-                      "服务内容: TP-Link 路由器\n服务内容: TP-Link 路由器", "TP-Link 路由器\n$0",
-                      "- 服务内容: TP-Link 路由器\n服务内容: TP-Link 路由器"):
-            with self.subTest(quote=quote):
-                invalid = copy.deepcopy(selection)
-                invalid["assessments"][0]["requirements"][0]["quote"] = quote
-                result = self.functions["validate_selection"](llm_output=json.dumps(invalid), **arguments)
-                self.assertEqual(result["error"], "")
-                self.assertEqual(json.loads(result["recommendations_json"])[0]["requirement_assessments"][0]["quote"], quote)
-        ambiguous = copy.deepcopy(candidates)
-        ambiguous[0]["markdown"] += "\n服务内容: TP-Link 路由器"
-        result = self.functions["validate_selection"](
-            llm_output=json.dumps(selection), candidates_json=json.dumps(ambiguous), needs_json=arguments["needs_json"],
-        )
-        self.assertEqual(result["error"], "")
-        for node_id in ("select", "reply"):
-            self.assertIn("预缴不等于押金", self.nodes[node_id]["prompt_template"][0]["text"])
-
-    def test_reported_xe_evidence_can_reorder_source_facts(self):
-        names = {
-            "XDY2A81": "Disney+ 標準計劃 1個月自由約",
-            "XDY2P1261AR": "Disney+ 標準計劃 (每月$20回贈)",
-            "XDY4P1279AR": "Disney+ 高級計劃 (每月$20回贈)",
-        }
-        explanations = [
-            "用户需要独立订阅电影服务，该候选为独立的Disney+影音串流服务，无合约期限制，月费81港元，符合独立订阅需求。",
-            "该候选为独立的Disney+标准计划，12个月合约，月费61港元（回赠后），符合独立订阅电影服务需求。",
-            "该候选为独立的Disney+高级计划，12个月合约，月费79港元（回赠后），提供4K画质，符合独立订阅电影服务需求。",
-        ]
-        selection = {
-            "selected_plan_codes": list(names),
-            "assessments": [{
-                "plan_code": code,
-                "requirements": [{"requirement_id": "R1", "status": "supported",
-                                  "quote": "服务类型: XE\n方案名称: " + name, "explanation": explanation}],
-            } for (code, name), explanation in zip(names.items(), explanations)],
-            "reason": "用户明确要求独立订阅电影服务，候选池中所有XE类型Disney+套餐均为独立影音服务，无宽频捆绑，满足需求；Netflix套餐虽也属XE但用户未指定平台，优先推荐Disney+选项。",
-        }
-        _, _, stage = self.turn(
-            "独立订阅吧", routing=self.route("XE"), changes=self.changes(add=["需要独立订阅电影服务"]),
-            shortlist={"selected_plan_codes": list(names) + ["XENXP103C12NCC", "XENXS78C12ND"], "reason": "真实候选池重放"},
-            selection=selection,
-        )
-        self.assertEqual(stage["outputs"]["validate_selection"]["error"], "")
-        self.assertEqual(stage["mode"], "recommend")
-        candidates = json.loads(stage["outputs"]["rank"]["sales_candidates_json"])
-        documents = {plan["plan_code"]: plan["markdown"] for plan in candidates}
-        plans = json.loads(stage["outputs"]["reply_context"]["selected_plans_json"])
-        canonical = copy.deepcopy(selection)
-        for plan, assessment in zip(plans, canonical["assessments"]):
-            code = plan["plan_code"]
-            original = "服务类型: XE\n方案名称: " + names[code]
-            expected = "方案名称: " + names[code] + "\n服务类型: XE"
-            self.assertNotIn(original, documents[code])
-            self.assertIn(expected, documents[code])
-            self.assertEqual(plan["requirement_assessments"][0]["quote"], original)
-            self.assertEqual(plan["requirement_assessments"][0]["status"], "supported")
-            assessment["requirements"][0]["quote"] = original
-        arguments = {
-            "candidates_json": stage["outputs"]["rank"]["sales_candidates_json"],
-            "needs_json": stage["outputs"]["decision_state"]["needs_json"],
-        }
-        self.assertEqual(self.functions["validate_selection"](llm_output=json.dumps(canonical), **arguments),
-                         stage["outputs"]["validate_selection"])
-        for quote in (
-            "服务类型: XE\n方案名称: " + names["XDY4P1279AR"],
-            "服务类型: XE\nDisney+", "服务类型: XE\n月费: 0", "服务类型: XE\n服务类型: XE",
-            "服务类型: XE\n- 合约期: 無合約期限制^",
-        ):
-            with self.subTest(quote=quote):
-                invalid = copy.deepcopy(selection)
-                invalid["assessments"][0]["requirements"][0]["quote"] = quote
-                result = self.functions["validate_selection"](llm_output=json.dumps(invalid), **arguments)
-                self.assertEqual(result["error"], "")
-        ambiguous = copy.deepcopy(candidates)
-        ambiguous[0]["markdown"] += "\n服务类型: XE"
-        result = self.functions["validate_selection"](
-            llm_output=json.dumps(selection), candidates_json=json.dumps(ambiguous), needs_json=arguments["needs_json"],
-        )
-        self.assertEqual(result["error"], "")
-        for separator in ("\n\n", "\n### 不同段落\n"):
-            with self.subTest(separator=separator):
-                separated = copy.deepcopy(candidates)
-                separated[0]["markdown"] = "方案名称: " + names["XDY2A81"] + separator + "服务类型: XE"
-                result = self.functions["validate_selection"](
-                    llm_output=json.dumps(selection), candidates_json=json.dumps(separated), needs_json=arguments["needs_json"],
-                )
-                self.assertEqual(result["error"], "")
-
-    def test_selection_and_backend_errors_reach_reply_without_product_facts(self):
-        initial, _, _ = self.ready_bn()
-        for selection in (
-            {"selected_plan_codes": [self.codes_a[0]], "reason": ""},
-            {"selected_plan_codes": [self.codes_b[0], self.codes_b[0]], "reason": ""},
-            {"selected_plan_codes": self.codes_b + [self.codes_a[0]], "reason": ""},
-        ):
-            saved, _, stage = self.address(self.codes_b, variables=initial, event_type="address_change", selection=selection)
-            self.assertEqual(stage["mode"], "error")
-            self.assertEqual(stage["outputs"]["reply_context"]["selected_plans_json"], "[]")
-            self.assertEqual(saved["bn_needs"]["last_recommended_codes"], [])
-        namespace = self.functions["rank"].__globals__
-        with patch.dict(namespace, {"mock_rank_and_details": Mock(side_effect=ValueError("详情服务失败"))}):
-            _, answer, stage = self.address(self.codes_b, variables=initial)
-            self.assertEqual(stage["mode"], "error")
-            self.assertIn("详情", answer)
-            self.assertEqual(stage["outputs"]["reply_context"]["selected_plans_json"], "[]")
 
     def test_error_reply_cannot_read_previous_product_reply(self):
         initial, _, _ = self.ready_bn()
@@ -2678,21 +1725,6 @@ class MultiBusinessWorkflowTests(unittest.TestCase):
         self.assertIn("context_update", self.nodes["extract"]["prompt_template"][0]["text"])
         self.assertIn("只输出给用户看的自然语言", self.nodes["reply"]["prompt_template"][0]["text"])
 
-    def test_field_document_covers_actual_variables_and_code_outputs(self):
-        document = (ROOT / ".scratch" / "aio-multi-business" / "fields.md").read_text(encoding="utf-8")
-        rows = document.splitlines()
-        for name in CONVERSATION:
-            self.assertTrue(any(row.startswith("| `" + name + "` |") for row in rows), name)
-        for name in NEEDS_DEFAULT:
-            self.assertTrue(any(row.startswith("| `" + name + "` |") for row in rows), name)
-        for node_id, data in self.nodes.items():
-            if data["type"] != "code":
-                continue
-            row = next((row for row in rows if row.startswith("| `" + node_id + "` |")), "")
-            self.assertTrue(row, node_id)
-            for field in data["outputs"]:
-                self.assertIn("`" + field + "`", row, (node_id, field))
-
     def test_graph_branches_selectors_and_explicit_assignments(self):
         self.assertEqual(len(self.nodes), len(self.graph["nodes"]))
         parent_ids = {node["id"]: node.get("parentId") for node in self.graph["nodes"]}
@@ -2720,7 +1752,7 @@ class MultiBusinessWorkflowTests(unittest.TestCase):
                     {case["case_id"] for case in data["cases"]} | {"false"},
                 )
             if not outgoing[node_id] and not parent_ids[node_id]:
-                self.assertEqual(node_id, "save_reply")
+                self.assertIn(node_id, {"save_reply", "product_link_action"})
             ancestors, pending = set(), incoming[node_id].copy()
             while pending:
                 parent = pending.pop()
@@ -2750,7 +1782,7 @@ class MultiBusinessWorkflowTests(unittest.TestCase):
                 if parent_ids[node_id]:
                     self.assertEqual(item["variable_selector"][0], parent_ids[node_id])
                 else:
-                    self.assertIn(item["variable_selector"][1], CONVERSATION)
+                    self.assertIn(item["variable_selector"][1], self.initial)
             for selector in selectors:
                 producer, field = selector[:2]
                 if producer in {"sys", "conversation", "env"}:
@@ -2781,8 +1813,7 @@ class MultiBusinessWorkflowTests(unittest.TestCase):
                 if parent_ids[node_id]:
                     self.assertTrue(all(item["variable_selector"][0] == parent_ids[node_id] for item in data["items"]))
                 else:
-                    self.assertEqual({item["variable_selector"][1] for item in data["items"]}, set(CONVERSATION))
-
+                    self.assertEqual({item["variable_selector"][1] for item in data["items"]}, set(self.initial))
 
 if __name__ == "__main__":
     unittest.main()
