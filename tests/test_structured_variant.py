@@ -99,7 +99,7 @@ class StructuredVariantTests(unittest.TestCase):
         reply = self.nodes["reply"]["data"]
         self.assertNotEqual(reply["model"]["completion_params"].get("response_format"), "json_object")
         self.assertFalse(reply.get("structured_output_enabled", False))
-        self.assertEqual(self.nodes["answer"]["data"]["answer"], "{{#reply_context.plan_summary#}}{{#reply.text#}}")
+        self.assertEqual(self.nodes["answer"]["data"]["answer"], "{{#reply.text#}}")
 
 
 if __name__ == "__main__":

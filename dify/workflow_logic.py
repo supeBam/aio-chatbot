@@ -1383,23 +1383,16 @@ def present_plans(bundle):
     selection = goal == "selection" and mode in ("recommend", "availability") and bool(plans)
     link = goal == "link" and mode == "lookup" and len(plans) == 1
     state = {"goal": goal, "mode": mode, "plan_codes": [plan["plan_code"] for plan in plans]}
-    summary = ""
-    if selection:
-        headings = [
-            f"{index}. {plan.get('display_name') or '計劃'}（{plan['plan_code']}）"
-            for index, plan in enumerate(plans, start=1)
-        ]
-        summary = "今次揀咗以下計劃：\n\n" + "\n".join(headings) + "\n\n"
     products = build_link_products(plans) if selection or link else []
     state["link_status"] = ("ready" if products else
                             "ambiguous" if goal == "link" and mode == "lookup" else
                             mode if not plans else "not_requested")
-    return state, plans, summary, products
+    return state, plans, products
 
 
 def reply_context(bundle, message):
     snapshot = clone(bundle["snapshot"])
-    presentation, plans, plan_summary, products = present_plans(bundle)
+    presentation, plans, products = present_plans(bundle)
     mode = presentation["mode"]
     if bundle["business"] in BUSINESSES and presentation["goal"] == "selection" and mode in (
             "recommend", "availability", "no_match"):
@@ -1437,11 +1430,14 @@ def reply_context(bundle, message):
             instruction += "\n客戶想要指定計劃嘅辦理入口，請自然回應。入口由前端展示。"
         else:
             instruction += "\n如果有多款可能指代，只問客戶想要邊款。"
-    if plan_summary:
+    if presentation["goal"] == "selection" and mode in ("recommend", "availability"):
+        headings = [
+            f"##### 第 {index} 款｜{plan.get('display_name') or '計劃'}（{plan['plan_code']}）"
+            for index, plan in enumerate(plans, start=1)
+        ]
         instruction += (
-            "\n按推薦版式承接「今次揀咗」同有序套餐名單，名單含名稱及 {plan_code}。"
-            "直接按同一順序用「第 1 款」「第 2 款」講已核實嘅計劃內容、參考月費、合約同重要取捨。"
-            "毋須重列名單，亦唔將精選數目講成全目錄可售總數。"
+            "\n按推薦版式逐款介紹。依序喺每款介紹開頭原樣使用對應小標一次。\n"
+            + "\n".join(headings)
         )
     return {
         "snapshot": snapshot, "business": business, "mode": presentation["mode"],
@@ -1450,7 +1446,6 @@ def reply_context(bundle, message):
         "user_message": sales_user_text(message),
         "link_products": products,
         "presentation": presentation,
-        "plan_summary": plan_summary,
         "persist_reply": bundle["persist_reply"],
         "interview_topic": bundle["interview_topic"],
         "plans_tags_json": "[]"
@@ -1469,7 +1464,7 @@ def product_link_action(products, service_type):
     }
 
 
-def record_reply(snapshot, business, mode, text, selected_plans_json, persist_reply, interview_topic, presentation=None, plan_summary=""):
+def record_reply(snapshot, business, mode, text, selected_plans_json, persist_reply, interview_topic, presentation=None):
     snapshot = clone(snapshot)
     if not business and mode == "clarify":
         snapshot["routing_context"]["question"] = text
@@ -1487,7 +1482,7 @@ def record_reply(snapshot, business, mode, text, selected_plans_json, persist_re
                 needs["last_recommended_codes"] = shown_codes
         if needs["interview_pending"] and mode in ("lookup", "lookup_unavailable", "availability", "no_match"):
             return {"snapshot": snapshot}
-        needs["last_reply"] = plan_summary + text
+        needs["last_reply"] = text
         needs["interview_pending"] = mode in ("interview", "clarify")
         needs["last_interview_topic"] = interview_topic if mode in ("interview", "clarify") else ""
         if mode == "interview" and interview_topic and interview_topic not in needs["asked_topics"]:

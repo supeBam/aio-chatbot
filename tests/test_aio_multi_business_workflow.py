@@ -1000,12 +1000,35 @@ class MultiBusinessWorkflowTests(unittest.TestCase):
         self.assertEqual(saved["bn_needs"]["last_reply"], answer)
 
     def test_answer_directly_references_llm_and_records_after_stream(self):
-        self.assertEqual(self.nodes["answer"]["answer"], "{{#reply_context.plan_summary#}}{{#reply.text#}}")
+        self.assertEqual(self.nodes["answer"]["answer"], "{{#reply.text#}}")
         links = {(edge["source"], edge["target"]) for edge in self.graph["edges"]}
         self.assertIn(("reply", "answer"), links)
         self.assertIn(("answer", "record_reply"), links)
         self.assertIn(("record_reply", "save_reply"), links)
         self.assertNotIn("response_json", json.dumps(self.flow))
+
+    def test_recommendations_stream_only_the_plan_sections_and_keep_their_order(self):
+        for count in (1, 2):
+            with self.subTest(count=count):
+                plans = self.sources["MS"][:count][::-1]
+                codes = [plan["plan_code"] for plan in plans]
+                text = "\n\n".join(
+                    f"##### 第 {index} 款｜流動通訊計劃（{code}）\n計劃內容"
+                    for index, code in enumerate(codes, start=1)
+                )
+                saved, answer, stage = self.turn(
+                    "推介流動通訊計劃", routing=self.route("MS"),
+                    changes=self.changes(delivery_goal="selection"),
+                    shortlist=self.product_output(plans), reply_text=text,
+                )
+                self.assertEqual(stage["mode"], "recommend")
+                self.assertEqual(answer, text)
+                self.assertEqual(saved["ms_needs"]["last_reply"], text)
+                self.assertEqual(saved["ms_needs"]["last_recommended_codes"], codes)
+                self.assertEqual(
+                    [product["plan_code"] for product in stage["outputs"]["product_link_action"]["products"]],
+                    codes,
+                )
         _, _, stage = self.address()
         self.assertLess(stage["executed"].index("answer"), stage["executed"].index("record_reply"))
         self.assertNotIn("address_action", stage["executed"])

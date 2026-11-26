@@ -120,7 +120,7 @@ class StructuredRetryContractTests(unittest.TestCase):
         self.assertEqual(state["selection_turn_requirements"], [requirement])
         self.assertNotIn("turn_requirements", state["active_selection"])
         recorded = run("record_reply", context["snapshot"], "MS", context["mode"], "推荐",
-                       context["selected_plans_json"], True, "", context["presentation"], context["plan_summary"])
+                       context["selected_plans_json"], True, "", context["presentation"])
         message = "还有其他的选择吗？"
         ingress = run("ingress", message, "message", "", **recorded["snapshot"])
         self.assertTrue(ingress["ok"], ingress["error"])
@@ -166,7 +166,7 @@ class StructuredRetryContractTests(unittest.TestCase):
         self.assertEqual(second["presentation"]["plan_codes"], [codes[2]])
         self.assertEqual(second["snapshot"]["ms_needs"]["active_selection"]["shown_plan_codes"], codes)
         saved = run("record_reply", second["snapshot"], "MS", second["mode"], "其他选择",
-                    second["selected_plans_json"], True, "", second["presentation"], second["plan_summary"])
+                    second["selected_plans_json"], True, "", second["presentation"])
         self.assertEqual(saved["snapshot"]["ms_needs"]["selection_turn_requirements"], [requirement])
 
     def test_purchase_switch_archive_survives_node_depth_validation(self):

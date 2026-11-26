@@ -396,8 +396,8 @@ class CustomerTurnPolicyTests(unittest.TestCase):
             {"plan_code": code, "markdown": "提供家居寬頻"} for code in codes
         ])
         context = self.run_node["reply_context"](bundle, "")
-        self.assertIn("今次揀咗", context["instruction"])
-        self.assertIn("{plan_code}", context["instruction"])
+        self.assertIn("按推薦版式逐款介紹", context["instruction"])
+        self.assertIn(f"（{codes[0]}）", context["instruction"])
         action = self.product_link(context)
         self.assertEqual(action["frontend_action"], "SHOW_PRODUCT_LINK")
         self.assertEqual([plan["plan_code"] for plan in action["products"]], codes)
@@ -456,7 +456,11 @@ class CustomerTurnPolicyTests(unittest.TestCase):
         self.assertEqual(self.product_link(context)["frontend_action"], "SHOW_PRODUCT_LINK")
         self.assertEqual([item["plan_code"] for item in context["link_products"]], codes)
         self.assertEqual(context["presentation"]["plan_codes"], codes)
-        self.assertLess(context["plan_summary"].index(codes[0]), context["plan_summary"].index(codes[1]))
+        headings = [line for line in context["instruction"].splitlines() if line.startswith("#####")]
+        self.assertEqual(headings, [
+            f"##### 第 1 款｜1000M連路由器（{codes[0]}）",
+            f"##### 第 2 款｜1000M家居寬頻（{codes[1]}）",
+        ])
         saved = self.record_reply(context, "兩款主要分別係合約期。")
         self.assertEqual(saved["bn_needs"]["last_recommended_codes"], codes)
 
@@ -498,7 +502,7 @@ class CustomerTurnPolicyTests(unittest.TestCase):
         stale = {**resumed, "mode": "availability", "selected_plans": [bundle["selected_plans"][0]]}
         context = self.run_node["reply_context"](stale, "")
         self.assertEqual(context["mode"], "no_match")
-        self.assertEqual(context["plan_summary"], "")
+        self.assertNotIn("按推薦版式", context["instruction"])
         self.assertEqual(self.product_link(context)["frontend_action"], "NONE")
 
     def test_no_match_still_passes_explicit_questions_and_current_evidence(self):

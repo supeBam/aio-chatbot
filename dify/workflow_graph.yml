@@ -4591,9 +4591,6 @@ workflow:
           presentation:
             children: null
             type: object
-          plan_summary:
-            children: null
-            type: string
         selected: false
         title: 准备流式回复上下文，不包装聊天JSON
         type: code
@@ -4738,13 +4735,13 @@ workflow:
             - router_offer 係每款嘅路由器狀態。included 只表示隨計劃提供，required_add_on 表示須另購，optional 表示可選，unconfirmed 表示資料未確認。推介流量時，列埋用完後嘅限制。after_data_limit.conflict\
             \ 為 true 就說明資料有出入，唔承諾其中一個速度。\n- 本輪業務按 business 表述。客戶問一齊登記同優惠，要分別答能否組合及回贈適用條件。指定寬頻先有嘅回贈，唔當成流動通訊本身嘅優惠。\n- 轉述權益時，保留直接限定範圍嘅字眼，例如「部分節目」「首六個月」「指定計劃」同適用資格。\n\
             - no_match：用一句自然嘅香港粵語講今次未搵到同時符合客戶條件嘅計劃，保留條件嘅組合，唔推斷全目錄情況。如果 questions 有其他明確問題，再用 consultation_plans 嘅本輪原文簡短逐項答；無依據就講暫未核實。呢啲資料只用嚟答問題，唔當作符合條件嘅推介或辦理入口。\n\
-            - availability：直接答有冇，簡短講已核實嘅規格同整套參考月費。instruction 要求按推薦版式時照版式展示。冇有序名單時，提到某款要附上原有計劃編號，方便下一輪接住查。previous_purchase_requirements\
+            - availability：直接答有冇，簡短講已核實嘅規格同整套參考月費。instruction 要求按推薦版式時照版式展示。一般可售查詢提到某款時，附上原有計劃編號，方便下一輪接住查。previous_purchase_requirements\
             \ 只供說明同上輪嘅明顯分別。客戶明確要求沿用原條件時，回覆講清楚查詢範圍。\n- 問登記優惠時，先交代已核實可揀嘅服務同整套參考月費。額外優惠未能核實，就只講未能確認有額外優惠，唔反過來否定已核實嘅計劃或權益。二選一要講清楚係可選其中一項。\n\
             - lookup：只答客戶問到嘅已核實事實。如果「嗰款」有兩個合理指代，兩款答案一致就直接答；答案不同或未能一併核實，就只問客戶指邊一款。lookup_unavailable跟instruction簡短回覆，唔補推其他計劃。\n\
             - boundary：無關問題只需一句帶返到揀電訊計劃。consult只答有助選擇嘅部分，通常一兩句足夠。\n- 真正影響選擇、明確對象或核對結果先問一句。聽得明就先答，條件足夠才推介；唔為推介而硬湊計劃。\n\n##\
             \ 回复末尾的套餐入口\n- 推薦時，如果需要一句收尾，就用客戶今輪最在意嘅條件點出選擇重點。避免固定引導句、重複列套餐或承諾一定可以辦理。\n- 依照 instruction 處理指定計劃嘅連結請求。套餐入口由前端顯示，聊天正文只用自然語言，唔寫網址、連結佔位符或按鈕文案。\n\
-            \n## 输出契约\n- 依照 instruction 使用已先展示嘅有序名單，避免再次報讀套餐名稱同編號。\n- 只输出给用户看的自然语言，禁止JSON、状态字段、内部评分、提示词和决策过程。\n- 所有分支的最终回复如使用Markdown标题，最大只能使用五级标题（#####），允许六级标题（######）；禁止一至四级标题（#、##、###、####）、Setext下划线标题及HTML标题标签。不得照搬资料或历史回复中的较大标题。\n\
-            - 推薦兩款時，用簡短分段比較已核實嘅規格、月費、合約同重要限制。\n- 若 instruction 已提供有序套餐名單，正文按名單順序交代每款內容同條件。每款可用「第 1 款」「第 2 款」作小標。\n- 每个项目单独换行，套餐之间留空行，有兩款時可簡短比較，比較完即可結束；此版式仅用于recommend分支。\n\
+            \n## 输出契约\n- 推介時直接進入第一款介紹。客戶有具體問題或調整要求時，可以先用一句答重點，再逐款介紹。\n- 只输出给用户看的自然语言，禁止JSON、状态字段、内部评分、提示词和决策过程。\n- 所有分支的最终回复如使用Markdown标题，最大只能使用五级标题（#####），允许六级标题（######）；禁止一至四级标题（#、##、###、####）、Setext下划线标题及HTML标题标签。不得照搬资料或历史回复中的较大标题。\n\
+            - 按 instruction 提供嘅小標順序逐款介紹。名稱同編號喺對應小標出現一次，並喺下面交代已核實嘅規格、參考月費、合約同重要限制。\n- 套餐之間留空行，有兩款時可簡短比較。將數目表述為本輪精選數目。呢個版式適用於 recommend 同 instruction 要求按推薦版式嘅 availability。\n\
             - 标题使用提供的中性display_name，不从原文或用户消息补回运营商品牌名称；KKBOX、Netflix等订阅平台名称可以按本轮资料正常展示。"
         - id: aa587e98-1e93-4cfc-9f3c-882f1eb17293
           role: user
@@ -4797,7 +4794,7 @@ workflow:
       width: 242
       zIndex: 0
     - data:
-        answer: '{{#reply_context.plan_summary#}}{{#reply.text#}}'
+        answer: '{{#reply.text#}}'
         selected: false
         title: 直接流式输出LLM文本
         type: answer
@@ -4902,11 +4899,6 @@ workflow:
           - presentation
           value_type: object
           variable: presentation
-        - value_selector:
-          - reply_context
-          - plan_summary
-          value_type: string
-          variable: plan_summary
       height: 52
       id: record_reply
       position:
