@@ -1007,15 +1007,23 @@ class MultiBusinessWorkflowTests(unittest.TestCase):
         self.assertIn(("record_reply", "save_reply"), links)
         self.assertNotIn("response_json", json.dumps(self.flow))
 
-    def test_recommendations_stream_only_the_plan_sections_and_keep_their_order(self):
-        for count in (1, 2):
-            with self.subTest(count=count):
+    def test_recommendations_stream_markdown_and_keep_plan_order(self):
+        for count, layout in ((1, "sections"), (2, "sections"), (2, "table")):
+            with self.subTest(count=count, layout=layout):
                 plans = self.sources["MS"][:count][::-1]
                 codes = [plan["plan_code"] for plan in plans]
-                text = "\n\n".join(
-                    f"##### 第 {index} 款｜流動通訊計劃（{code}）\n計劃內容"
-                    for index, code in enumerate(codes, start=1)
-                )
+                if layout == "table":
+                    text = (
+                        "| 比較項目 | 第 1 款 | 第 2 款 |\n"
+                        "| --- | --- | --- |\n"
+                        f"| 計劃 | 流動通訊計劃（{codes[0]}） | 流動通訊計劃（{codes[1]}） |"
+                        "\n\n**留意**\n\n合約條款以計劃資料為準。"
+                    )
+                else:
+                    text = "\n\n".join(
+                        f"##### 第 {index} 款｜流動通訊計劃（{code}）\n\n- **計劃內容**\n- 合約條款以計劃資料為準。"
+                        for index, code in enumerate(codes, start=1)
+                    )
                 saved, answer, stage = self.turn(
                     "推介流動通訊計劃", routing=self.route("MS"),
                     changes=self.changes(delivery_goal="selection"),

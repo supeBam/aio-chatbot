@@ -1436,7 +1436,7 @@ def reply_context(bundle, message):
             for index, plan in enumerate(plans, start=1)
         ]
         instruction += (
-            "\n按推薦版式逐款介紹。依序喺每款介紹開頭原樣使用對應小標一次。\n"
+            "\n按推薦版式依照以下計劃順序。逐款介紹時用對應小標。用表格比較時按同一順序列出計劃名稱同編號。\n"
             + "\n".join(headings)
         )
     return {

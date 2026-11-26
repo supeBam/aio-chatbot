@@ -396,7 +396,7 @@ class CustomerTurnPolicyTests(unittest.TestCase):
             {"plan_code": code, "markdown": "提供家居寬頻"} for code in codes
         ])
         context = self.run_node["reply_context"](bundle, "")
-        self.assertIn("按推薦版式逐款介紹", context["instruction"])
+        self.assertIn("按推薦版式依照以下計劃順序", context["instruction"])
         self.assertIn(f"（{codes[0]}）", context["instruction"])
         action = self.product_link(context)
         self.assertEqual(action["frontend_action"], "SHOW_PRODUCT_LINK")
