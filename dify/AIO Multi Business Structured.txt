@@ -1310,7 +1310,7 @@ workflow:
           : text,\n                                         \"attitude\": attitude,\
           \ \"evidence\": []})\n            for field in LEGACY_FIELDS:\n        \
           \        needs.pop(field)\n            needs.update(requirements=migrated,\
-          \ next_requirement_id=len(migrated) + 1, last_validation_errors=[])\n\x20       if not isinstance(needs, dict) or set(needs) - {\"purchase_archive\", \"purchase_label\", \"active_selection\"} != set(NEEDS_DEFAULT):\n\            raise ValueError(\"用户需求结构无效或版本不兼容，请新建会话\")\n        archive = needs.get(\"purchase_archive\", {})\n\
+          \ next_requirement_id=len(migrated) + 1, last_validation_errors=[])\n\x20       if not isinstance(needs, dict) or set(needs) - {\"purchase_archive\", \"purchase_label\", \"active_selection\", \"selection_turn_requirements\"} != set(NEEDS_DEFAULT):\n\            raise ValueError(\"用户需求结构无效或版本不兼容，请新建会话\")\n        archive = read_purchase_archive(needs)\n\
           \x20       if not isinstance(needs.get(\"purchase_label\", \"\"), str) or not isinstance(archive, dict):\n\
           \x20           raise ValueError(\"选购记忆结构无效\")\n\
           \x20       for key, saved in archive.items():\n\
@@ -1377,8 +1377,8 @@ workflow:
           \ interview_topic=\"\"):\n    return {\n        \"snapshot\": snapshot,\
           \ \"business\": business, \"mode\": mode,\n        \"instruction\": instruction,\
           \ \"selected_plans\": selected_plans or [],\n        \"persist_reply\":\
-          \ persist_reply, \"interview_topic\": interview_topic\n    }\n\ndef main(query,\
-          \ event_type, bn_plan_codes, **conversation):\n    snapshot = clone(conversation)\n\
+          \ persist_reply, \"interview_topic\": interview_topic\n    }\n\ndef read_purchase_archive(needs):\n    archive = needs.get(\"purchase_archive\", {})\n    if isinstance(archive, str):\n        archive = json.loads(archive)\n    if not isinstance(archive, dict):\n        raise ValueError(\"选购记忆结构无效\")\n    return archive\n\n\ndef read_active_selection(needs):\n    selection = needs.get(\"active_selection\")\n    if selection is None:\n        return None\n    if not isinstance(selection, dict):\n        raise ValueError(\"当前选购结构无效\")\n    if \"turn_requirements\" in selection:\n        requirements = selection[\"turn_requirements\"]\n    else:\n        requirements = needs[\"selection_turn_requirements\"]\n    if not isinstance(requirements, list):\n        raise ValueError(\"当前选购临时需求结构无效\")\n    return {**selection, \"turn_requirements\": requirements}\n\n\ndef normalize_selection_state(snapshot):\n    for business in BUSINESSES:\n        needs = snapshot[business.lower() + \"_needs\"]\n        if not isinstance(needs, dict):\n            raise ValueError(\"用户需求结构无效\")\n        selection = needs.get(\"active_selection\")\n        if selection is not None:\n            if not isinstance(selection, dict):\n                raise ValueError(\"当前选购结构无效\")\n            if \"turn_requirements\" in selection:\n                if \"selection_turn_requirements\" in needs:\n                    raise ValueError(\"当前选购临时需求重复\")\n                needs[\"selection_turn_requirements\"] = selection.pop(\"turn_requirements\")\n            if not isinstance(needs.get(\"selection_turn_requirements\"), list):\n                raise ValueError(\"当前选购临时需求结构无效\")\n        elif \"selection_turn_requirements\" in needs:\n            raise ValueError(\"当前选购临时需求缺少选购状态\")\n        if \"purchase_archive\" in needs:\n            needs[\"purchase_archive\"] = dump(read_purchase_archive(needs))\n\n\ndef main(query,\
+          \ event_type, bn_plan_codes, **conversation):\n    snapshot = clone(conversation)\n    normalize_selection_state(snapshot)\n\
           \    result = {\n        \"snapshot\": snapshot, \"ok\": False, \"event\"\
           : \"\", \"message\": \"\", \"error\": \"\",\n        \"active_business\"\
           : \"\", \"last_reply\": \"\", \"routing_json\": \"{}\"\n    }\n    try:\n\
@@ -1389,12 +1389,12 @@ workflow:
           \             raise ValueError(\"用户消息和套餐编号必须为字符串，用户消息不能为空\")\n         \
           \   if bn_plan_codes:\n                raise ValueError(\"普通消息不能携带地址结果\"\
           )\n            message = query.strip()\n        else:\n\x20           if snapshot[\"current_business\"] != \"BN\":\n\
-          \x20               snapshot[\"bn_needs\"].pop(\"active_selection\", None)\n            snapshot[\"\
+          \x20               snapshot[\"bn_needs\"].pop(\"active_selection\", None)\n                snapshot[\"bn_needs\"].pop(\"selection_turn_requirements\", None)\n            snapshot[\"\
           current_business\"] = \"BN\"\n\x20           if \"active_selection\" in snapshot[\"bn_needs\"]:\n\
           \x20               snapshot[\"bn_needs\"][\"active_selection\"][\"shown_plan_codes\"] = []\n            snapshot[\"bn_scope_codes\"] =\
           \ []\n            snapshot[\"bn_plans_tags\"] = []\n            snapshot[\"\
-          bn_catalog_status\"] = \"error\"\n            for saved in snapshot[\"bn_needs\"].get(\"purchase_archive\", {}).values():\n\
-          \x20               saved.update(last_reply=\"\", last_recommended_codes=[], interview_pending=False, last_interview_topic=\"\")\n            snapshot[\"bn_needs\"].update(\n\
+          bn_catalog_status\"] = \"error\"\n            archive = read_purchase_archive(snapshot[\"bn_needs\"])\n            for saved in archive.values():\n\
+          \x20               saved.update(last_reply=\"\", last_recommended_codes=[], interview_pending=False, last_interview_topic=\"\")\n            if \"purchase_archive\" in snapshot[\"bn_needs\"]:\n                snapshot[\"bn_needs\"][\"purchase_archive\"] = dump(archive)\n            snapshot[\"bn_needs\"].update(\n\
           \                last_reply=\"\", interview_pending=False, last_recommended_codes=[],\
           \ last_interview_topic=\"\"\n            )\n            if not isinstance(query,\
           \ str) or not query.strip() or not isinstance(bn_plan_codes, str):\n   \
@@ -4839,7 +4839,7 @@ workflow:
           \x20   return other_tags + [\"；\".join([service, *dict.fromkeys(details)]) for service, details in services.items()]\n\
           \n\
           \n\
-          def main(bundle, snapshot, business):\n    snapshot = clone(snapshot)\n    prefix = business.lower()\n\
+          def read_purchase_archive(needs):\n    archive = needs.get(\"purchase_archive\", {})\n    if isinstance(archive, str):\n        archive = json.loads(archive)\n    if not isinstance(archive, dict):\n        raise ValueError(\"选购记忆结构无效\")\n    return archive\n\n\ndef read_active_selection(needs):\n    selection = needs.get(\"active_selection\")\n    if selection is None:\n        return None\n    if not isinstance(selection, dict):\n        raise ValueError(\"当前选购结构无效\")\n    if \"turn_requirements\" in selection:\n        requirements = selection[\"turn_requirements\"]\n    else:\n        requirements = needs[\"selection_turn_requirements\"]\n    if not isinstance(requirements, list):\n        raise ValueError(\"当前选购临时需求结构无效\")\n    return {**selection, \"turn_requirements\": requirements}\n\n\ndef main(bundle, snapshot, business):\n    snapshot = clone(snapshot)\n    prefix = business.lower()\n\
           \    status, plans = bundle[\"status\"], validate_tags(bundle[\"plans_tags\"\
           ])\n    if bundle[\"request_json\"]:\n        snapshot[prefix + \"_catalog_status\"\
           ] = status\n        snapshot[prefix + \"_plans_tags\"] = plans\n    if status\
@@ -4851,10 +4851,10 @@ workflow:
           no_plans\", \"本次查询成功，但没有可推荐的套餐。可以更换地址或咨询其他业务。\"),\n        \"error\": (\"\
           error\", bundle[\"error\"]),\n        \"consult\": (\"consult\", \"\")\n\
           \    }[status]\n    active = snapshot[prefix + \"_needs\"]\n\
-          \x20   view = {key: value for key, value in active.items() if key not in (\"purchase_archive\", \"active_selection\")}\n\x20   if \"active_selection\" in active:\n\
-          \x20       view[\"active_selection\"] = {\"turn_requirements\": active[\"active_selection\"][\"turn_requirements\"]}\n\x20   view[\"purchase_archive\"] = {\n\
+          \x20   view = {key: value for key, value in active.items()\n            if key not in (\"purchase_archive\", \"active_selection\", \"selection_turn_requirements\")}\n\x20   selection = read_active_selection(active)\n    if selection is not None:\n\
+          \x20       view[\"active_selection\"] = {\"turn_requirements\": selection[\"turn_requirements\"]}\n\x20   view[\"purchase_archive\"] = {\n\
           \x20       key: {\"label\": saved[\"purchase_label\"], \"requirements\": saved[\"requirements\"]}\n\
-          \x20       for key, saved in active.get(\"purchase_archive\", {}).items()\n\
+          \x20       for key, saved in read_purchase_archive(active).items()\n\
           \x20   }\n    return {\n        \"snapshot\": snapshot, \"process\"\
           : mode == \"process\",\n        \"business\": business, \"mode\": mode,\
           \ \"instruction\": instruction,\n        \"plans_tags\": plans, \"plans_tags_json\": json.dumps([\n\
@@ -5309,13 +5309,13 @@ workflow:
           \ \"business\": business, \"mode\": mode,\n        \"instruction\": instruction,\
           \ \"selected_plans\": selected_plans or [],\n        \"persist_reply\":\
           \ persist_reply, \"interview_topic\": interview_topic\n    }\n\ndef main(snapshot,\
-          \ business, mode, instruction):\n    return {\"bundle\": reply_bundle(snapshot,\
-          \ business, mode, instruction)}\n"
+          \ business, mode, instruction):\n    return {\"bundle\": json.dumps(reply_bundle(snapshot,\
+          \ business, mode, instruction), ensure_ascii=False)}\n"
         code_language: python3
         outputs:
           bundle:
             children: null
-            type: object
+            type: string
         selected: false
         title: 准备表单、空结果、失败或一般咨询
         type: code
@@ -6020,12 +6020,12 @@ workflow:
           \x20       quote.strip(\" ，,。！？!?\"),\n\
           \x20   ) for quote in evidence)\n\
           \n\
-          \ndef main(llm_output, snapshot, business, event=\"message\"):\n    snapshot = clone(snapshot)\n    needs = snapshot[business.lower()\
+          \ndef read_purchase_archive(needs):\n    archive = needs.get(\"purchase_archive\", {})\n    if isinstance(archive, str):\n        archive = json.loads(archive)\n    if not isinstance(archive, dict):\n        raise ValueError(\"选购记忆结构无效\")\n    return archive\n\n\ndef read_active_selection(needs):\n    selection = needs.get(\"active_selection\")\n    if selection is None:\n        return None\n    if not isinstance(selection, dict):\n        raise ValueError(\"当前选购结构无效\")\n    if \"turn_requirements\" in selection:\n        requirements = selection[\"turn_requirements\"]\n    else:\n        requirements = needs[\"selection_turn_requirements\"]\n    if not isinstance(requirements, list):\n        raise ValueError(\"当前选购临时需求结构无效\")\n    return {**selection, \"turn_requirements\": requirements}\n\n\ndef main(llm_output, snapshot, business, event=\"message\"):\n    snapshot = clone(snapshot)\n    needs = snapshot[business.lower()\
           \ + \"_needs\"]\n    needs[\"requirements\"] = [item for item in needs[\"\
           requirements\"] if not operator_reference(item[\"text\"])]\n    needs[\"\
           questions\"] = [item for item in needs[\"questions\"] if not operator_reference(item[\"\
           text\"])]\n    needs[\"last_validation_errors\"] = []\n    pending = needs[\"\
-          pending_messages\"]\n\x20   saved_selection = needs.get(\"active_selection\")\n\
+          pending_messages\"]\n\x20   saved_selection = read_active_selection(needs)\n\
           \x20   if business == \"BN\" and event == \"address_change\" and not pending and saved_selection:\n\
           \x20       needs.update(questions=[], next_question_id=1)\n\
           \x20       bundle = reply_bundle(snapshot, business, \"analyze\")\n\
@@ -6133,7 +6133,7 @@ workflow:
           查找某类计划必须提供本轮条件或待澄清问题\")\n        if switch is not None:\n            if not isinstance(switch,\
           \ dict) or set(switch) != {\"target\", \"evidence\"}:\n                raise\
           \ ValueError(\"选购切换结构无效\")\n            verify_evidence(switch[\"evidence\"\
-          ])\n            archive = needs.get(\"purchase_archive\", {})\n        \
+          ])\n            archive = read_purchase_archive(needs)\n        \
           \    target = switch[\"target\"]\n            if not isinstance(target,\
           \ str) or (target != \"new\" and target not in archive):\n             \
           \   raise ValueError(\"选购切换目标无效\")\n            archived_id = \"S\" + str(max((int(key[1:])\
@@ -6144,7 +6144,7 @@ workflow:
           \            current = clone(NEEDS_DEFAULT) if target == \"new\" else archive.pop(target)\n\
           \            archive[archived_id] = saved\n            if target == \"new\"\
           :\n                current[\"purchase_label\"] = \" \".join(switch[\"evidence\"\
-          ])\n            current.update(purchase_archive=archive, pending_messages=pending)\n\
+          ])\n            current.update(purchase_archive=dump(archive), pending_messages=pending)\n\
           \            snapshot[business.lower() + \"_needs\"] = needs = current\n\
           \        if not set(excluded_ids).issubset({item[\"id\"] for item in needs[\"\
           requirements\"]}):\n            raise ValueError(\"临时排除只能引用当前选购的已保存需求\"\
@@ -6570,17 +6570,17 @@ workflow:
           \x20       quote.strip(\" ，,。！？!?\"),\n\
           \x20   ) for quote in evidence)\n\
           \n\
-          \ndef main(llm_output, snapshot, business, event=\"message\"):\n    snapshot = clone(snapshot)\n    needs = snapshot[business.lower()\
+          \ndef read_purchase_archive(needs):\n    archive = needs.get(\"purchase_archive\", {})\n    if isinstance(archive, str):\n        archive = json.loads(archive)\n    if not isinstance(archive, dict):\n        raise ValueError(\"选购记忆结构无效\")\n    return archive\n\n\ndef read_active_selection(needs):\n    selection = needs.get(\"active_selection\")\n    if selection is None:\n        return None\n    if not isinstance(selection, dict):\n        raise ValueError(\"当前选购结构无效\")\n    if \"turn_requirements\" in selection:\n        requirements = selection[\"turn_requirements\"]\n    else:\n        requirements = needs[\"selection_turn_requirements\"]\n    if not isinstance(requirements, list):\n        raise ValueError(\"当前选购临时需求结构无效\")\n    return {**selection, \"turn_requirements\": requirements}\n\n\ndef main(llm_output, snapshot, business, event=\"message\"):\n    snapshot = clone(snapshot)\n    needs = snapshot[business.lower()\
           \ + \"_needs\"]\n    needs[\"requirements\"] = [item for item in needs[\"\
           requirements\"] if not operator_reference(item[\"text\"])]\n    needs[\"\
           questions\"] = [item for item in needs[\"questions\"] if not operator_reference(item[\"\
           text\"])]\n    needs[\"last_validation_errors\"] = []\n    pending = needs[\"\
-          pending_messages\"]\n\x20   saved_selection = needs.get(\"active_selection\")\n\
+          pending_messages\"]\n\x20   saved_selection = read_active_selection(needs)\n\
           \x20   if business == \"BN\" and event == \"address_change\" and not pending and saved_selection:\n\
           \x20       needs.update(questions=[], next_question_id=1)\n\
           \x20       bundle = reply_bundle(snapshot, business, \"analyze\")\n\
           \x20       bundle.update(clone(saved_selection), delivery_goal=\"selection\")\n\
-          \x20       return {\"bundle\": bundle}\n    try:\n        output = parse_model_json(llm_output)\n\
+          \x20       return {\"bundle\": json.dumps(bundle, ensure_ascii=False)}\n    try:\n        output = parse_model_json(llm_output)\n\
           \x20       if not isinstance(output, dict) or \"changes\" not in output or set(output) - {\"changes\", \"question_changes\", \"recommend\", \"clarification\", \"reason\", \"readiness\", \"context_update\", \"turn_intent\", \"availability_scope\", \"turn_conditions\", \"temporarily_excluded_ids\", \"purchase_switch\", \"link_request\", \"catalog_recommendation\", \"delivery_goal\", \"selection_context\", \"replaced_temporary_ids\"}:\n            raise ValueError(\"\
           需求输出结构无效，必须包含changes且不能有未知字段\")\n        for field, default in ((\"clarification\"\
           , \"\"), (\"reason\", \"\"), (\"context_update\", None)):\n            output.setdefault(field,\
@@ -6683,7 +6683,7 @@ workflow:
           查找某类计划必须提供本轮条件或待澄清问题\")\n        if switch is not None:\n            if not isinstance(switch,\
           \ dict) or set(switch) != {\"target\", \"evidence\"}:\n                raise\
           \ ValueError(\"选购切换结构无效\")\n            verify_evidence(switch[\"evidence\"\
-          ])\n            archive = needs.get(\"purchase_archive\", {})\n        \
+          ])\n            archive = read_purchase_archive(needs)\n        \
           \    target = switch[\"target\"]\n            if not isinstance(target,\
           \ str) or (target != \"new\" and target not in archive):\n             \
           \   raise ValueError(\"选购切换目标无效\")\n            archived_id = \"S\" + str(max((int(key[1:])\
@@ -6694,7 +6694,7 @@ workflow:
           \            current = clone(NEEDS_DEFAULT) if target == \"new\" else archive.pop(target)\n\
           \            archive[archived_id] = saved\n            if target == \"new\"\
           :\n                current[\"purchase_label\"] = \" \".join(switch[\"evidence\"\
-          ])\n            current.update(purchase_archive=archive, pending_messages=pending)\n\
+          ])\n            current.update(purchase_archive=dump(archive), pending_messages=pending)\n\
           \            snapshot[business.lower() + \"_needs\"] = needs = current\n\
           \        if not set(excluded_ids).issubset({item[\"id\"] for item in needs[\"\
           requirements\"]}):\n            raise ValueError(\"临时排除只能引用当前选购的已保存需求\"\
@@ -6779,8 +6779,8 @@ workflow:
           interview_rounds\"] = min(4, needs[\"interview_rounds\"] + 1)\n        if\
           \ turn_intent == \"shop\":\n            needs[\"interview_pending\"] = False\n\
           \        if errors:\n            needs.update(ready_to_recommend=False,\
-          \ last_validation_errors=errors)\n            return {\"bundle\": reply_bundle(snapshot,\
-          \ business, \"error\", \"需求校验失败，明确部分已保存：\" + \"；\".join(errors))}\n\x20       needs[\"requirements\"] = [\n\
+          \ last_validation_errors=errors)\n            return {\"bundle\": json.dumps(reply_bundle(snapshot,\
+          \ business, \"error\", \"需求校验失败，明确部分已保存：\" + \"；\".join(errors)), ensure_ascii=False)}\n\x20       needs[\"requirements\"] = [\n\
           \x20           item for item in needs[\"requirements\"]\n\
           \x20           if not (item[\"attitude\"] == \"uninterested\" and withdraws_optional_service(item[\"evidence\"]))\n\
           \x20       ]\n    \
@@ -6820,15 +6820,15 @@ workflow:
           \x20           raise ValueError(\"交付目标与查询对象或客户原话不一致\")\n\
           \x20       bundle.update(delivery_goal=delivery_goal, turn_intent=turn_intent, availability_scope=availability_scope,\n                      turn_requirements=turn_requirements,\
           \ temporarily_excluded_ids=excluded_ids, link_request=link_request, catalog_recommendation=catalog_recommendation)\n\
-          \        return {\"bundle\": bundle}\n    except (ValueError, TypeError)\
+          \        return {\"bundle\": json.dumps(bundle, ensure_ascii=False)}\n    except (ValueError, TypeError)\
           \ as error:\n        needs.update(ready_to_recommend=False, last_validation_errors=[str(error)])\n\
-          \        return {\"bundle\": reply_bundle(snapshot, business, \"error\"\
-          , \"需求校验失败：\" + str(error))}\n"
+          \        return {\"bundle\": json.dumps(reply_bundle(snapshot, business, \"error\"\
+          , \"需求校验失败：\" + str(error)), ensure_ascii=False)}\n"
         code_language: python3
         outputs:
           bundle:
             children: null
-            type: object
+            type: string
         selected: false
         title: 按条校验并保存需求，交由产品分析决策
         type: code
@@ -6868,7 +6868,7 @@ workflow:
       width: 242
       zIndex: 0
     - data:
-        output_type: object
+        output_type: string
         selected: false
         title: 汇合互斥分支
         type: variable-aggregator
@@ -6957,7 +6957,7 @@ workflow:
           s*(?:(?:其他資訊|其他资讯|使用|所属|所屬|移动|流动|流動|網絡|网络|名稱|名称|\"\n            r\"服務供應商|服务供应商|網絡供應商|网络供应商|[:：])[\
           \ ]*)+\", line\n        ):\n            continue\n        lines.append(re.sub(r\"\
           [ ]{2,}\", \" \", line).strip())\n    return \"\\n\".join(lines)\n\ndef\
-          \ sales_needs(needs):\n    view = clone(needs)\n\x20   view.pop(\"active_selection\", None)\n    view[\"requirements\"\
+          \ sales_needs(needs):\n    view = clone(needs)\n\x20   view.pop(\"active_selection\", None)\n    view.pop(\"selection_turn_requirements\", None)\n    view[\"requirements\"\
           ] = [\n        {**item, \"text\": neutral_product_name(item[\"text\"]),\n\
           \         \"evidence\": [sales_user_text(quote) for quote in item[\"evidence\"\
           ]]}\n        for item in view[\"requirements\"] if not operator_reference(item[\"\
@@ -7076,6 +7076,7 @@ workflow:
           \ \"business\": business, \"mode\": mode,\n        \"instruction\": instruction,\
           \ \"selected_plans\": selected_plans or [],\n        \"persist_reply\":\
           \ persist_reply, \"interview_topic\": interview_topic\n    }\n\ndef main(bundle):\n\
+          \    if isinstance(bundle, str):\n        bundle = json.loads(bundle)\n\
           \    snapshot = bundle[\"snapshot\"]\n    prefix = bundle[\"business\"].lower()\n\
           \    needs = sales_needs(snapshot[prefix + \"_needs\"])\n    needs.pop(\"\
           purchase_archive\", None)\n    needs[\"turn_intent\"] = bundle.get(\"turn_intent\"\
@@ -7156,7 +7157,7 @@ workflow:
         - value_selector:
           - decision
           - output
-          value_type: object
+          value_type: string
           variable: bundle
       height: 52
       id: decision_state
@@ -7822,7 +7823,7 @@ workflow:
           \ \"business\": business, \"mode\": mode,\n        \"instruction\": instruction,\
           \ \"selected_plans\": selected_plans or [],\n        \"persist_reply\":\
           \ persist_reply, \"interview_topic\": interview_topic\n    }\n\ndef main(bundle,\
-          \ plans_tags, llm_output):\n    bundle = clone(bundle)\n    snapshot, business\
+          \ plans_tags, llm_output):\n    bundle = json.loads(bundle) if isinstance(bundle, str) else clone(bundle)\n    snapshot, business\
           \ = bundle[\"snapshot\"], bundle[\"business\"]\n    needs = snapshot[business.lower()\
           \ + \"_needs\"]\n    needs[\"ready_to_recommend\"] = False\n    try:\n \
           \       output = parse_model_json(llm_output)\n        if \"follow_up\"\
@@ -7917,7 +7918,7 @@ workflow:
         - value_selector:
           - decision
           - output
-          value_type: object
+          value_type: string
           variable: bundle
         - value_selector:
           - catalog
@@ -8179,7 +8180,7 @@ workflow:
           \ \"business\": business, \"mode\": mode,\n        \"instruction\": instruction,\
           \ \"selected_plans\": selected_plans or [],\n        \"persist_reply\":\
           \ persist_reply, \"interview_topic\": interview_topic\n    }\n\ndef main(bundle,\
-          \ plans_tags, llm_output):\n    bundle = clone(bundle)\n    snapshot, business\
+          \ plans_tags, llm_output):\n    bundle = json.loads(bundle) if isinstance(bundle, str) else clone(bundle)\n    snapshot, business\
           \ = bundle[\"snapshot\"], bundle[\"business\"]\n    needs = snapshot[business.lower()\
           \ + \"_needs\"]\n    needs[\"ready_to_recommend\"] = False\n    try:\n \
           \       output = parse_model_json(llm_output)\n        if \"follow_up\"\
@@ -8261,7 +8262,7 @@ workflow:
         - value_selector:
           - decision
           - output
-          value_type: object
+          value_type: string
           variable: bundle
         - value_selector:
           - catalog
@@ -8288,7 +8289,7 @@ workflow:
       width: 242
       zIndex: 0
     - data:
-        code: "def main(bundle):\n    return {\"bundle\": bundle}\n"
+        code: "import json\n\ndef main(bundle):\n    return {\"bundle\": json.loads(bundle) if isinstance(bundle, str) else bundle}\n"
         code_language: python3
         outputs:
           bundle:
@@ -8301,7 +8302,7 @@ workflow:
         - value_selector:
           - decision
           - output
-          value_type: object
+          value_type: string
           variable: bundle
       height: 52
       id: skip_analysis
@@ -8660,7 +8661,7 @@ workflow:
           s*(?:(?:其他資訊|其他资讯|使用|所属|所屬|移动|流动|流動|網絡|网络|名稱|名称|\"\n            r\"服務供應商|服务供应商|網絡供應商|网络供应商|[:：])[\
           \ ]*)+\", line\n        ):\n            continue\n        lines.append(re.sub(r\"\
           [ ]{2,}\", \" \", line).strip())\n    return \"\\n\".join(lines)\n\ndef\
-          \ sales_needs(needs):\n    view = clone(needs)\n\x20   view.pop(\"active_selection\", None)\n    view[\"requirements\"\
+          \ sales_needs(needs):\n    view = clone(needs)\n\x20   view.pop(\"active_selection\", None)\n    view.pop(\"selection_turn_requirements\", None)\n    view[\"requirements\"\
           ] = [\n        {**item, \"text\": neutral_product_name(item[\"text\"]),\n\
           \         \"evidence\": [sales_user_text(quote) for quote in item[\"evidence\"\
           ]]}\n        for item in view[\"requirements\"] if not operator_reference(item[\"\
@@ -11186,7 +11187,7 @@ workflow:
           s*(?:(?:其他資訊|其他资讯|使用|所属|所屬|移动|流动|流動|網絡|网络|名稱|名称|\"\n            r\"服務供應商|服务供应商|網絡供應商|网络供应商|[:：])[\
           \ ]*)+\", line\n        ):\n            continue\n        lines.append(re.sub(r\"\
           [ ]{2,}\", \" \", line).strip())\n    return \"\\n\".join(lines)\n\ndef\
-          \ sales_needs(needs):\n    view = clone(needs)\n\x20   view.pop(\"active_selection\", None)\n    view[\"requirements\"\
+          \ sales_needs(needs):\n    view = clone(needs)\n\x20   view.pop(\"active_selection\", None)\n    view.pop(\"selection_turn_requirements\", None)\n    view[\"requirements\"\
           ] = [\n        {**item, \"text\": neutral_product_name(item[\"text\"]),\n\
           \         \"evidence\": [sales_user_text(quote) for quote in item[\"evidence\"\
           ]]}\n        for item in view[\"requirements\"] if not operator_reference(item[\"\
@@ -11362,9 +11363,8 @@ workflow:
           \x20               bundle.get(\"excluded_plan_codes\", []) + presentation[\"plan_codes\"]\n\
           \x20           )),\n\x20           \"turn_intent\": bundle.get(\"turn_intent\", \"shop\"),\n\
           \x20           \"availability_scope\": bundle.get(\"availability_scope\", \"catalog\"),\n\
-          \x20           \"turn_requirements\": bundle.get(\"turn_requirements\", []),\n\
           \x20           \"temporarily_excluded_ids\": bundle.get(\"temporarily_excluded_ids\", []),\n\
-          \x20       }\n    business = bundle[\"business\"]\n    needs = sales_needs(snapshot[business.lower()\
+          \x20       }\n        snapshot[bundle[\"business\"].lower() + \"_needs\"][\"selection_turn_requirements\"] = bundle.get(\"turn_requirements\", [])\n    business = bundle[\"business\"]\n    needs = sales_needs(snapshot[business.lower()\
           \ + \"_needs\"]) if business else clone(NEEDS_DEFAULT)\n    needs.pop(\"\
           purchase_archive\", None)\n\x20   if mode in (\"availability\", \"no_match\", \"lookup_unavailable\"):\n        excluded_ids = set(bundle.get(\"\
           temporarily_excluded_ids\", []))\n        saved = needs[\"requirements\"\

@@ -125,6 +125,8 @@
 - `bn_plans_tags`、`ms_plans_tags`、`xe_plans_tags`：各业务的标签目录。
 - `bn_catalog_status`、`ms_catalog_status`、`xe_catalog_status`：对应目录的加载状态。
 
+为满足代码节点的对象深度限制，`active_selection` 只保存选购元信息，临时需求放在同一业务需求对象的 `selection_turn_requirements` 中。历史选购 `purchase_archive` 以 JSON 字符串保存，读取、更新后再序列化；不要直接按对象访问该字段。入口节点会将旧会话中嵌套的临时需求和对象形式的归档迁移为新格式，不丢弃原有需求、展示顺序或归档编号。归档仍受 Dify 字符串长度限制，部署时须留意会话数据增长。
+
 理解数据流时，可先沿这条主链查看输入输出（括号内是画布标题，代码为节点 ID）：
 
 1. “校验事件、替换地址并使旧产品数据失效”（`ingress`）产出标准化事件、消息和状态快照。

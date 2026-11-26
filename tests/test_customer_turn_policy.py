@@ -7,7 +7,7 @@ from unittest.mock import patch
 import yaml
 
 
-WORKFLOW = Path(__file__).resolve().parents[1] / "dify" / "AIO Multi Business Structured.yml"
+WORKFLOW = Path(__file__).resolve().parents[1] / "dify" / "AIO Multi Business Structured.txt"
 
 
 class CustomerTurnPolicyTests(unittest.TestCase):
@@ -36,7 +36,7 @@ class CustomerTurnPolicyTests(unittest.TestCase):
         }
         validated = self.run_node["extract_validation"](result, self.snapshot, business)
         self.assertFalse(validated["retry"], validated["error"])
-        return self.run_node["merge"](validated["text"], self.snapshot, business)["bundle"]
+        return json.loads(self.run_node["merge"](validated["text"], self.snapshot, business)["bundle"])
 
     def test_unrelated_turn_leaves_purchase_and_routing_memory_untouched(self):
         self.snapshot["current_business"] = "MS"
@@ -186,7 +186,7 @@ class CustomerTurnPolicyTests(unittest.TestCase):
         self.snapshot = family["snapshot"]
         active = self.snapshot["ms_needs"]
         self.assertEqual([item["text"] for item in active["requirements"]], ["50GB"])
-        self.assertEqual(active["purchase_archive"]["S1"]["requirements"], [existing])
+        self.assertEqual(json.loads(active["purchase_archive"])["S1"]["requirements"], [existing])
         self.assertTrue(self.run_node["ingress"]("返去我嗰張", "message", "", **self.snapshot)["ok"])
         resumed = self.merge("返去我嗰張", purchase_switch={"target": "S1", "evidence": ["我嗰張"]})
         self.assertEqual(resumed["snapshot"]["ms_needs"]["requirements"], [existing])
@@ -491,7 +491,7 @@ class CustomerTurnPolicyTests(unittest.TestCase):
         changed = self.run_node["ingress"]("已更改地址", "address_change", "AX10924DB", **saved)
         self.assertTrue(changed["ok"], changed["error"])
         self.assertEqual(changed["snapshot"]["bn_needs"]["last_recommended_codes"], [])
-        resumed = self.run_node["merge"]("", changed["snapshot"], "BN", "address_change")["bundle"]
+        resumed = json.loads(self.run_node["merge"]("", changed["snapshot"], "BN", "address_change")["bundle"])
         self.assertEqual(resumed["delivery_goal"], "selection")
         self.assertEqual(resumed["turn_requirements"], bundle["turn_requirements"])
         self.assertEqual(resumed["snapshot"]["bn_scope_codes"], ["AX10924DB"])
