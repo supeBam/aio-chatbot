@@ -6,27 +6,28 @@ from pathlib import Path
 import yaml
 from jsonschema import Draft202012Validator
 
+from dify import workflow_logic
 from dify.model_output_schemas import MODEL_SCHEMAS
 
 
 WORKFLOW = Path(__file__).resolve().parents[1] / "dify" / "AIO Multi Business Structured.txt"
 
 
-def assert_dify_depth(test, value, depth=1, path="output"):
-    if depth > 5:
-        test.fail(f"Depth limit 5 reached, object too deep: {path}")
+def assert_dify_depth(test, value, depth=1, path="output", limit=5):
+    if depth > limit:
+        test.fail(f"Depth limit {limit} reached, object too deep: {path}")
     if isinstance(value, dict):
         for key, child in value.items():
             if isinstance(child, dict):
-                assert_dify_depth(test, child, depth + 1, f"{path}.{key}")
+                assert_dify_depth(test, child, depth + 1, f"{path}.{key}", limit)
             elif isinstance(child, list):
                 for index, item in enumerate(child):
                     if isinstance(item, (dict, list)):
-                        assert_dify_depth(test, item, depth + 1, f"{path}.{key}[{index}]")
+                        assert_dify_depth(test, item, depth + 1, f"{path}.{key}[{index}]", limit)
     elif isinstance(value, list):
         for index, item in enumerate(value):
             if isinstance(item, (dict, list)):
-                assert_dify_depth(test, item, depth + 1, f"{path}[{index}]")
+                assert_dify_depth(test, item, depth + 1, f"{path}[{index}]", limit)
 
 
 class StructuredRetryContractTests(unittest.TestCase):
@@ -40,7 +41,7 @@ class StructuredRetryContractTests(unittest.TestCase):
             namespace = {}
             exec(compile(self.nodes[node_id]["code"], node_id, "exec"), namespace)
             result = namespace["main"](*args, **kwargs)
-            assert_dify_depth(self, result)
+            assert_dify_depth(self, result, path=node_id, limit=4)
             return result
 
         snapshot = {item["name"]: copy.deepcopy(item["value"])
@@ -65,9 +66,9 @@ class StructuredRetryContractTests(unittest.TestCase):
         plans = [{"plan_code": code, "tag": ["移动通讯"]} for code in ("P1", "P2", "P3")]
         choice = {"action": "recommend", "selected_plan_codes": ["P3"],
                   "follow_up": None, "reason": "其他选择"}
-        validation = run("shortlist_validation", json.dumps(bundle), plans, choice)
+        validation = run("shortlist_validation", workflow_logic.pack_bundle(bundle), plans, choice)
         self.assertFalse(validation["retry"], validation["error"])
-        decision = run("product_decision", json.dumps(bundle), plans, validation["text"])
+        decision = run("product_decision", workflow_logic.pack_bundle(bundle), plans, validation["text"])
         self.assertEqual(decision["bundle"]["mode"], "availability")
         self.assertEqual(json.loads(decision["shortlist_json"])["selected_plan_codes"], ["P3"])
 
@@ -95,13 +96,13 @@ class StructuredRetryContractTests(unittest.TestCase):
             namespace = {}
             exec(compile(self.nodes[node_id]["code"], node_id, "exec"), namespace)
             result = namespace["main"](*args, **kwargs)
-            assert_dify_depth(self, result)
+            assert_dify_depth(self, result, path=node_id, limit=4)
             return result
 
         snapshot = {item["name"]: copy.deepcopy(item["value"])
                     for item in self.flow["workflow"]["conversation_variables"]}
         snapshot["current_business"] = "MS"
-        plans = run("fetch_tags", "MS", snapshot)["bundle"]["plans_tags"]
+        plans = workflow_logic.fetch_tags("MS", snapshot)["plans_tags"]
         codes = [plan["plan_code"] for plan in plans[:3]]
         self.assertEqual(len(codes), 3)
         snapshot.update(ms_catalog_status="ready", ms_plans_tags=plans)
@@ -113,7 +114,7 @@ class StructuredRetryContractTests(unittest.TestCase):
                  "availability_scope": "current_purchase", "turn_requirements": [requirement],
                  "selected_plans": [{"plan_code": code, "markdown": "方案名称：移动通讯"}
                                     for code in codes[:2]]}
-        context = run("reply_context", first, "有冇咩移動通訊Plan推介？")
+        context = run("reply_context", workflow_logic.pack_bundle(first), "有冇咩移動通訊Plan推介？")
         self.assertEqual(context["presentation"]["plan_codes"], codes[:2])
         state = context["snapshot"]["ms_needs"]
         self.assertEqual(state["selection_turn_requirements"], [requirement])
@@ -127,8 +128,7 @@ class StructuredRetryContractTests(unittest.TestCase):
                  "intent": "shopping", "business_requests": []}
         prepared = run("prepare", json.dumps(route), ingress["snapshot"], "message", message)
         self.assertTrue(prepared["ok"], prepared["text"])
-        catalog = run("catalog", {"status": "ready", "plans_tags": plans, "request_json": "", "error": ""},
-                      prepared["snapshot"], "MS")
+        catalog = run("catalog", prepared["snapshot"], "MS", "shopping")
         self.assertEqual(json.loads(catalog["needs_json"])["active_selection"]["turn_requirements"], [requirement])
         extraction = {
             "changes": [], "question_changes": [], "clarification": "", "reason": "其他选择",
@@ -140,7 +140,7 @@ class StructuredRetryContractTests(unittest.TestCase):
         checked = run("extract_validation", extraction, catalog["snapshot"], "MS", "message")
         self.assertFalse(checked["retry"], checked["error"])
         merged = run("merge", checked["text"], catalog["snapshot"], "MS", "message")
-        bundle = json.loads(merged["bundle"])
+        bundle = workflow_logic.unpack_bundle(merged["bundle"])
         self.assertEqual(bundle["turn_requirements"], [requirement])
         self.assertEqual(bundle["excluded_plan_codes"], codes[:2])
         state = run("decision_state", merged["bundle"])
@@ -149,7 +149,6 @@ class StructuredRetryContractTests(unittest.TestCase):
         validation = run("shortlist_validation", merged["bundle"], plans, choice)
         self.assertFalse(validation["retry"], validation["error"])
         decision = run("product_decision", merged["bundle"], plans, validation["text"])
-        run("product_state", decision["bundle"])
         ranked = run("rank", decision["bundle"], plans, decision["shortlist_json"])
         self.assertEqual(ranked["error"], "")
         candidate = json.loads(ranked["sales_candidates_json"])[0]
@@ -175,7 +174,7 @@ class StructuredRetryContractTests(unittest.TestCase):
             namespace = {}
             exec(compile(self.nodes[node_id]["code"], node_id, "exec"), namespace)
             result = namespace["main"](*args, **kwargs)
-            assert_dify_depth(self, result)
+            assert_dify_depth(self, result, path=node_id, limit=4)
             return result
 
         snapshot = {item["name"]: copy.deepcopy(item["value"])
@@ -195,7 +194,7 @@ class StructuredRetryContractTests(unittest.TestCase):
         }
         validated = run("extract_validation", changes, snapshot, "MS")
         self.assertFalse(validated["retry"], validated["error"])
-        family = json.loads(run("merge", validated["text"], snapshot, "MS")["bundle"])
+        family = workflow_logic.unpack_bundle(run("merge", validated["text"], snapshot, "MS")["bundle"])
         family_snapshot = family["snapshot"]
         self.assertEqual(json.loads(family_snapshot["ms_needs"]["purchase_archive"])["S1"]["requirements"], [original])
         ingress = run("ingress", "返去我嗰張", "message", "", **family_snapshot)
@@ -205,7 +204,7 @@ class StructuredRetryContractTests(unittest.TestCase):
         changes.update(changes=[], purchase_switch={"target": "S1", "evidence": ["我嗰張"]})
         validated = run("extract_validation", changes, switched_snapshot, "MS")
         self.assertFalse(validated["retry"], validated["error"])
-        resumed = json.loads(run("merge", validated["text"], switched_snapshot, "MS")["bundle"])
+        resumed = workflow_logic.unpack_bundle(run("merge", validated["text"], switched_snapshot, "MS")["bundle"])
         self.assertEqual(resumed["snapshot"]["ms_needs"]["requirements"], [original])
         self.assertEqual(
             json.loads(resumed["snapshot"]["ms_needs"]["purchase_archive"])["S2"]["requirements"][0]["text"],
@@ -248,60 +247,50 @@ class StructuredRetryContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "临时需求重复"):
             namespace["main"]("查询", "message", "", **snapshot)
 
-    def test_serialized_decision_bundle_reaches_all_branches(self):
-        root = Path(__file__).resolve().parents[1]
-        paths = [WORKFLOW]
-        selected_workflow = root / "AIO Multi Business Structured.txt"
-        if selected_workflow.is_file():
-            paths.append(selected_workflow)
-        for path in paths:
-            with self.subTest(workflow=path.name, directory=path.parent.name):
-                flow = yaml.safe_load(path.read_text(encoding="utf-8-sig"))["workflow"]
-                nodes = {node["id"]: node["data"] for node in flow["graph"]["nodes"]}
-                snapshot = {item["name"]: copy.deepcopy(item["value"]) for item in flow["conversation_variables"]}
-                snapshot["ms_needs"]["user_context"] = "手机套餐"
-                bundle = {"snapshot": snapshot, "business": "MS", "mode": "analyze", "instruction": ""}
-                serialized = json.dumps(bundle, ensure_ascii=False)
-                choice = {"action": "recommend", "selected_plan_codes": [], "follow_up": None, "reason": "没有候选"}
-                for node_id in ("shortlist_validation", "product_decision", "skip_analysis"):
-                    with self.subTest(node=node_id):
-                        node = nodes[node_id]
-                        variable = next(v for v in node["variables"] if v["variable"] == "bundle")
-                        namespace = {}
-                        exec(compile(node["code"], node_id, "exec"), namespace)
-                        main = namespace["main"]
-                        if node_id == "shortlist_validation":
-                            args = ([], choice)
-                        elif node_id == "product_decision":
-                            args = ([], json.dumps(choice, ensure_ascii=False))
-                        else:
-                            args = ()
-                        self.assertEqual(main(serialized, *args), main(bundle, *args))
-                        self.assertEqual(variable["value_type"], "string")
-                        with self.assertRaises(json.JSONDecodeError):
-                            main("{", *args)
+    def test_decision_branches_share_the_same_bundle_contract(self):
+        def run(node_id, *args):
+            node = self.nodes[node_id]
+            scope = {}
+            exec(compile(node["code"], node_id, "exec"), scope)
+            result = scope["main"](*args)
+            assert_dify_depth(self, result, path=node_id, limit=4)
+            return result
 
-                plans = [{"plan_code": "P1", "tag": ["月费98元"]}]
-                choices = [
-                    ({"action": "recommend", "selected_plan_codes": ["P1"], "follow_up": None,
-                      "reason": "核对套餐"}, "recommend"),
-                    ({"action": "interview", "selected_plan_codes": [],
-                      "follow_up": {"topic": "budget", "information_needed": "月费预算",
-                                    "selection_impact": "影响套餐选择", "blocking": False},
-                      "reason": "确认预算"}, "interview"),
-                    ({"action": "recommend", "selected_plan_codes": ["UNKNOWN"], "follow_up": None,
-                      "reason": "不在目录"}, "error"),
-                ]
-                scopes = {}
-                for node_id in ("shortlist_validation", "product_decision"):
-                    scopes[node_id] = {}
-                    exec(compile(nodes[node_id]["code"], node_id, "exec"), scopes[node_id])
-                for choice, expected_mode in choices:
-                    with self.subTest(action=choice["action"], expected_mode=expected_mode):
-                        validated = scopes["shortlist_validation"]["main"](serialized, plans, choice)
-                        self.assertEqual(validated["retry"], expected_mode == "error")
-                        result = scopes["product_decision"]["main"](serialized, plans, validated["text"])
-                        self.assertEqual(result["bundle"]["mode"], expected_mode)
+        snapshot = copy.deepcopy(workflow_logic.DEFAULTS)
+        snapshot["ms_needs"]["user_context"] = "手机套餐"
+        bundle = workflow_logic.pack_bundle({"snapshot": snapshot, "business": "MS", "mode": "analyze",
+                                            "instruction": "", "persist_reply": True, "interview_topic": "",
+                                            "selected_plans": []})
+        plans = [{"plan_code": "P1", "tag": ["月费98元"]}]
+        choices = [
+            ({"action": "recommend", "selected_plan_codes": ["P1"], "follow_up": None,
+              "reason": "核对套餐"}, "recommend"),
+            ({"action": "interview", "selected_plan_codes": [],
+              "follow_up": {"topic": "budget", "information_needed": "月费预算",
+                            "selection_impact": "影响套餐选择", "blocking": False},
+              "reason": "确认预算"}, "interview"),
+            ({"action": "recommend", "selected_plan_codes": ["UNKNOWN"], "follow_up": None,
+              "reason": "不在目录"}, "error"),
+        ]
+        for choice, expected in choices:
+            with self.subTest(action=choice["action"], expected=expected):
+                validated = run("shortlist_validation", bundle, plans, choice)
+                self.assertEqual(validated["retry"], expected == "error")
+                result = run("product_decision", bundle, plans, validated["text"])
+                self.assertEqual(result["bundle"]["mode"], expected)
+                self.assertEqual(set(result["bundle"]), set(bundle))
+        self.assertEqual(run("skip_analysis", bundle)["bundle"], bundle)
+        early_inputs = [
+            ("input_failure", snapshot, "输入有误"),
+            ("scope_reply", snapshot, "请确认业务", "clarify"),
+            ("pre_reply", snapshot, "MS", "consult", ""),
+        ]
+        for node_id, *args in early_inputs:
+            with self.subTest(node=node_id):
+                early = run(node_id, *args)["bundle"]
+                self.assertEqual(set(early), set(bundle))
+                result = run("reply_context", early, "继续")
+                self.assertEqual(result["mode"], early["mode"])
 
     def test_assessment_schema_matches_prompt_without_redundant_reason(self):
         for schema in (MODEL_SCHEMAS["select"], self.nodes["select"]["structured_output"]["schema"]):

@@ -1,27 +1,26 @@
 import copy
 import json
-from pathlib import Path
 import unittest
 from unittest.mock import patch
 
+from pathlib import Path
+
 import yaml
 
+from dify import workflow_logic
 
-WORKFLOW = Path(__file__).resolve().parents[1] / "dify" / "AIO Multi Business Structured.txt"
+
+WORKFLOW = Path(__file__).resolve().parents[1] / "dify" / "AIO Multi Business Structured.yml"
 
 
 class CustomerTurnPolicyTests(unittest.TestCase):
+    defaults = workflow_logic.DEFAULTS
+    run_node = vars(workflow_logic)
+
     @classmethod
     def setUpClass(cls):
-        graph = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))["workflow"]
-        cls.nodes = {node["id"]: node["data"] for node in graph["graph"]["nodes"]}
-        cls.defaults = {variable["name"]: variable["value"] for variable in graph["conversation_variables"]}
-        cls.run_node = {}
-        for node_id, data in cls.nodes.items():
-            if data["type"] == "code":
-                scope = {}
-                exec(compile(data["code"], node_id, "exec"), scope)
-                cls.run_node[node_id] = scope["main"]
+        graph = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))["workflow"]["graph"]
+        cls.nodes = {node["id"]: node["data"] for node in graph["nodes"]}
 
     def setUp(self):
         self.snapshot = copy.deepcopy(self.defaults)
@@ -36,7 +35,7 @@ class CustomerTurnPolicyTests(unittest.TestCase):
         }
         validated = self.run_node["extract_validation"](result, self.snapshot, business)
         self.assertFalse(validated["retry"], validated["error"])
-        return json.loads(self.run_node["merge"](validated["text"], self.snapshot, business)["bundle"])
+        return self.run_node["merge"](validated["text"], self.snapshot, business)["bundle"]
 
     def test_unrelated_turn_leaves_purchase_and_routing_memory_untouched(self):
         self.snapshot["current_business"] = "MS"
@@ -115,7 +114,7 @@ class CustomerTurnPolicyTests(unittest.TestCase):
         snapshot.update(bn_scope_codes=codes, bn_catalog_status="ready")
         snapshot["bn_needs"]["ready_to_recommend"] = True
         bundle["mode"] = "availability"
-        plans = self.run_node["fetch_tags"]("BN", snapshot)["bundle"]["plans_tags"]
+        plans = self.run_node["fetch_tags"]("BN", snapshot)["plans_tags"]
         ranked = self.run_node["rank"](bundle, plans, json.dumps({"selected_plan_codes": codes, "reason": "查家居電話"}))
         self.assertEqual(ranked["error"], "")
         self.assertEqual([item["id"] for item in json.loads(ranked["request_json"])["requirements"]], ["T1"])
@@ -151,7 +150,7 @@ class CustomerTurnPolicyTests(unittest.TestCase):
             "text": "上一轮宽频连 Disney+ 组合有无优惠", "evidence": [message],
         }])
         snapshot = bundle["snapshot"]
-        catalog = self.run_node["fetch_tags"]("BN", snapshot)["bundle"]["plans_tags"]
+        catalog = self.run_node["fetch_tags"]("BN", snapshot)["plans_tags"]
         snapshot.update(bn_plans_tags=catalog, bn_catalog_status="ready")
         state = self.run_node["decision_state"](bundle)
         self.assertEqual(json.loads(state["comparison_context_json"])["previous_recommendations"][0]["plan_code"], code)
@@ -207,7 +206,7 @@ class CustomerTurnPolicyTests(unittest.TestCase):
         self.assertTrue(needs["interview_pending"])
 
     def mobile_catalog(self, intent):
-        plans = self.run_node["fetch_tags"]("MS", self.snapshot)["bundle"]["plans_tags"]
+        plans = self.run_node["fetch_tags"]("MS", self.snapshot)["plans_tags"]
         self.snapshot["ms_catalog_status"] = "ready"
         self.snapshot["ms_needs"]["user_context"] = "想搵手機上台計劃"
         bundle = {"snapshot": self.snapshot, "business": "MS", "instruction": "", "turn_intent": intent}
@@ -285,7 +284,7 @@ class CustomerTurnPolicyTests(unittest.TestCase):
         message = "有冇包每月3GB中國內地及澳門數據嘅？"
         bundle = self.merge(message, turn_intent="availability",
                             turn_conditions=[{"text": "每月3GB中國內地及澳門數據", "evidence": [message]}])
-        plans = self.run_node["fetch_tags"]("MS", self.snapshot)["bundle"]["plans_tags"]
+        plans = self.run_node["fetch_tags"]("MS", self.snapshot)["plans_tags"]
         bundle["snapshot"]["ms_catalog_status"] = "ready"
         code = plans[0]["plan_code"]
         choice = {"action": "recommend", "selected_plan_codes": [code], "follow_up": None, "reason": "查有冇"}
@@ -323,7 +322,7 @@ class CustomerTurnPolicyTests(unittest.TestCase):
                     message, turn_intent="availability", catalog_recommendation=evidence,
                     turn_conditions=[{"text": "包含日本漫遊", "evidence": [message]}],
                 )
-                plans = self.run_node["fetch_tags"]("MS", self.snapshot)["bundle"]["plans_tags"]
+                plans = self.run_node["fetch_tags"]("MS", self.snapshot)["plans_tags"]
                 bundle["snapshot"]["ms_catalog_status"] = "ready"
                 code = plans[0]["plan_code"]
                 decision = self.run_node["product_decision"](bundle, plans, json.dumps({
@@ -366,7 +365,7 @@ class CustomerTurnPolicyTests(unittest.TestCase):
         return self.run_node["record_reply"](**inputs)["snapshot"]
 
     def test_catalog_recommendation_caches_both_codes_in_link_order_for_follow_up(self):
-        plans = self.run_node["fetch_tags"]("MS", self.snapshot)["bundle"]["plans_tags"]
+        plans = self.run_node["fetch_tags"]("MS", self.snapshot)["plans_tags"]
         self.snapshot["ms_plans_tags"] = plans
         self.snapshot["ms_needs"]["interview_pending"] = True
         codes = [plans[1]["plan_code"], plans[0]["plan_code"]]
@@ -477,7 +476,7 @@ class CustomerTurnPolicyTests(unittest.TestCase):
                                 {"business": "BN", "operation": "add", "question_id": "",
                                  "text": link, "evidence": [link]},
                             ])
-        tags = self.run_node["fetch_tags"]("BN", lookup["snapshot"])["bundle"]["plans_tags"]
+        tags = self.run_node["fetch_tags"]("BN", lookup["snapshot"])["plans_tags"]
         choice = {"action": "recommend", "selected_plan_codes": [codes[0]], "follow_up": None, "reason": "核對"}
         wrong = self.run_node["product_decision"](lookup, tags, json.dumps(choice))
         self.assertEqual(wrong["bundle"]["mode"], "error")
@@ -491,7 +490,7 @@ class CustomerTurnPolicyTests(unittest.TestCase):
         changed = self.run_node["ingress"]("已更改地址", "address_change", "AX10924DB", **saved)
         self.assertTrue(changed["ok"], changed["error"])
         self.assertEqual(changed["snapshot"]["bn_needs"]["last_recommended_codes"], [])
-        resumed = json.loads(self.run_node["merge"]("", changed["snapshot"], "BN", "address_change")["bundle"])
+        resumed = self.run_node["merge"]("", changed["snapshot"], "BN", "address_change")["bundle"]
         self.assertEqual(resumed["delivery_goal"], "selection")
         self.assertEqual(resumed["turn_requirements"], bundle["turn_requirements"])
         self.assertEqual(resumed["snapshot"]["bn_scope_codes"], ["AX10924DB"])
@@ -556,7 +555,7 @@ class CustomerTurnPolicyTests(unittest.TestCase):
         self.assertEqual(other["excluded_plan_codes"], codes[:2])
         self.assertEqual([item["text"] for item in other["turn_requirements"]],
                          ["需要1G宽频", "月费低于$198"])
-        tags = self.run_node["fetch_tags"]("BN", other["snapshot"])["bundle"]["plans_tags"]
+        tags = self.run_node["fetch_tags"]("BN", other["snapshot"])["plans_tags"]
         choice = {"action": "recommend", "selected_plan_codes": [codes[0]], "follow_up": None, "reason": "查找"}
         self.assertEqual(self.run_node["product_decision"](other, tags, json.dumps(choice))["bundle"]["mode"], "error")
         choice["selected_plan_codes"] = [codes[2]]
@@ -617,7 +616,7 @@ class CustomerTurnPolicyTests(unittest.TestCase):
 
     def test_shortlist_retries_compatibly_with_literal_boolean_strings(self):
         bundle = self.merge("我想揀上台計劃")
-        plans = self.run_node["fetch_tags"]("MS", bundle["snapshot"])["bundle"]["plans_tags"]
+        plans = self.run_node["fetch_tags"]("MS", bundle["snapshot"])["plans_tags"]
         result = {"action": "clarify", "selected_plan_codes": [], "reason": "對象未能確定",
                   "follow_up": {"topic": "計劃指代", "information_needed": "你指邊一款？",
                                 "selection_impact": "按指定計劃核對", "blocking": "true"}}
@@ -634,7 +633,7 @@ class CustomerTurnPolicyTests(unittest.TestCase):
                 self.snapshot["bn_scope_codes"] = codes if business == "BN" else []
                 self.snapshot[business.lower() + "_catalog_status"] = "ready"
                 self.snapshot[business.lower() + "_needs"]["ready_to_recommend"] = True
-                plans = self.run_node["fetch_tags"](business, self.snapshot)["bundle"]["plans_tags"]
+                plans = self.run_node["fetch_tags"](business, self.snapshot)["plans_tags"]
                 bundle = {
                     "snapshot": self.snapshot, "business": business, "mode": "recommend", "instruction": "",
                     "persist_reply": True, "interview_topic": "",
@@ -720,7 +719,7 @@ class CustomerTurnPolicyTests(unittest.TestCase):
         bundle = self.merge(message, turn_intent="lookup", link_request=message, question_changes=[
             {"business": "MS", "operation": "add", "question_id": "", "text": message, "evidence": [message]},
         ])
-        plans = self.run_node["fetch_tags"]("MS", self.snapshot)["bundle"]["plans_tags"]
+        plans = self.run_node["fetch_tags"]("MS", self.snapshot)["plans_tags"]
         bundle["snapshot"]["ms_catalog_status"] = "ready"
         bundle["snapshot"]["ms_needs"]["last_recommended_codes"] = [plans[0]["plan_code"]]
         code = plans[0]["plan_code"]
@@ -764,7 +763,7 @@ class CustomerTurnPolicyTests(unittest.TestCase):
         self.assertEqual(self.product_link(ambiguous), no_action)
 
     def test_whole_plan_fee_is_read_from_basic_information(self):
-        plans = self.run_node["fetch_tags"]("XE", self.snapshot)["bundle"]["plans_tags"]
+        plans = self.run_node["fetch_tags"]("XE", self.snapshot)["plans_tags"]
         self.snapshot["xe_needs"]["ready_to_recommend"] = True
         self.snapshot["xe_catalog_status"] = "ready"
         bundle = {"snapshot": self.snapshot, "business": "XE", "mode": "lookup"}

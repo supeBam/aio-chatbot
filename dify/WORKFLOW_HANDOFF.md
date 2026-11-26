@@ -4,7 +4,7 @@
 
 ## 1. 工作流概览
 
-主工作流定义在 [AIO Multi Business Structured.txt](<./AIO Multi Business Structured.txt>)，是一个 Dify Advanced Chat 应用。它面向三类新购产品：
+主工作流是一个 Dify Advanced Chat 应用。它面向三类新购产品。
 
 - **BN**：家居宽带；候选范围受地址查询结果限制。
 - **MS**：移动通讯。
@@ -25,7 +25,9 @@
   → 流式生成自然语言回复并记录状态
 ```
 
-工作流里标注为 `mock` 的代码目前模拟后端接口。离线套餐标签生成工具见 [plan_catalog.py](./plan_catalog.py)；结构化模型输出的 JSON Schema 定义见 [model_output_schemas.py](./model_output_schemas.py)，相关构建逻辑见 [build_structured_variant.py](./build_structured_variant.py)。
+画布和提示词保存在 [workflow_graph.yml](./workflow_graph.yml)，确定性业务规则保存在 [workflow_logic.py](./workflow_logic.py)，模型输出契约保存在 [model_output_schemas.py](./model_output_schemas.py)。构建脚本从 [plan_catalog.py](./plan_catalog.py) 读取模拟接口数据，把每个节点所需的 Python 和 Schema 一起嵌入导出文件。
+
+在仓库根目录运行 `python dify/build_structured_variant.py` 重新生成两个内容相同的导入文件。运行 `python dify/build_structured_variant.py --check` 检查产物是否与源码一致。导入 Dify 时使用 [AIO Multi Business Structured.yml](<./AIO Multi Business Structured.yml>)。
 
 ## 2. LLM 节点
 
@@ -60,10 +62,7 @@
 
 | 画布标题（Dify 显示） | 节点 ID（配置标识） | 职责 |
 |---|---|---|
-| 检查标签数组，决定是否加载 | `catalog_context` | 根据业务、地址范围、目录缓存状态和咨询/选购意图，判断是否需要加载标签或可否直接短路。 |
-| 模拟接口一：批量获取套餐标签 | `fetch_tags` | 模拟批量获取套餐标签；BN 结果需与地址可售编号范围一致。 |
-| 复用数组，不请求后端 | `cached_tags` | 复用已存在的标签数组，不重复请求模拟接口。 |
-| 校验并保存当前业务产品目录 | `catalog` | 验证并保存当前业务目录，生成后续处理所需的目录 JSON、状态和指令。 |
+| 按需加载、校验并保存套餐目录 | `catalog` | 检查地址范围和缓存状态，按需加载模拟套餐标签，校验后生成目录数据与后续路由。通过 `loaded` 确认本轮是否调用标签服务。 |
 | 准备表单、空结果、失败或一般咨询 | `pre_reply` | 为地址表单、空结果、失败或一般咨询等无需走完整推荐的情形准备回复上下文。 |
 
 ### 3.3 需求提取与决策输入
@@ -81,7 +80,6 @@
 | 校验模型结果，不写入会话 | `shortlist_validation` | 校验“依据产品差异统一决定追问或推荐”的模型输出，并整理重试反馈。 |
 | 校验追问结构、产品范围及统一动作 | `product_decision` | 对追问结构、动作、业务和套餐编号执行最终代码侧校验，形成明确的本轮动作。 |
 | 缺地址、错误或一般咨询不执行产品决策 | `skip_analysis` | 对缺少必要地址、已有错误或一般咨询等分支保留原上下文，不继续执行产品决策。 |
-| 保存本轮已校验产品动作 | `product_state` | 保存通过校验的产品动作和回复模式，供后续分支使用。 |
 | 僅讀取本輪初篩計劃原文 | `rank` | 按初筛编号和顺序取原文。选 1 款就只取 1 款，最多 5 款。 |
 | 校验模型结果，不写入会话 | `select_validation` | 检查“逐需求核对套餐原文并精选最多2款”的模型输出结构及输入关联；整理错误信息或生成后续验证使用的结果。 |
 | 校验套餐、需求覆盖及原文引用 | `validate_selection` | 最终验证套餐是否属于当前候选、需求是否逐项覆盖，以及引用是否能在候选原文中找到。 |
@@ -125,13 +123,15 @@
 - `bn_plans_tags`、`ms_plans_tags`、`xe_plans_tags`：各业务的标签目录。
 - `bn_catalog_status`、`ms_catalog_status`、`xe_catalog_status`：对应目录的加载状态。
 
-为满足代码节点的对象深度限制，`active_selection` 只保存选购元信息，临时需求放在同一业务需求对象的 `selection_turn_requirements` 中。历史选购 `purchase_archive` 以 JSON 字符串保存，读取、更新后再序列化；不要直接按对象访问该字段。入口节点会将旧会话中嵌套的临时需求和对象形式的归档迁移为新格式，不丢弃原有需求、展示顺序或归档编号。归档仍受 Dify 字符串长度限制，部署时须留意会话数据增长。
+为满足代码节点的对象深度限制，`active_selection` 保存选购元信息，临时需求放在同一业务需求对象的 `selection_turn_requirements`。历史选购 `purchase_archive` 保存为 JSON 字符串。入口节点迁移旧会话中嵌套的临时需求和对象形式的归档，保留需求、展示顺序和归档编号。
+
+用于汇合分支的 `bundle` 是一个对象，直接包含会话字段、`mode` 和 `context_json`。本轮套餐、核验结果和回复指令放在 `context_json` 内。代码节点边界使用 `pack_bundle` 和 `unpack_bundle` 转换，业务函数在 Python 内操作结构化数据。完整连线测试在代码节点输出处检查四层深度，为 Dify 默认五层限制留出一层余量。长会话的历史归档仍受 Dify 字符串长度限制。
 
 理解数据流时，可先沿这条主链查看输入输出（括号内是画布标题，代码为节点 ID）：
 
 1. “校验事件、替换地址并使旧产品数据失效”（`ingress`）产出标准化事件、消息和状态快照。
 2. 各“校验模型结果，不写入会话”节点把 LLM 输出变成可供代码消费的受检数据，并提供重试反馈。
-3. “按业务保存待处理需求与澄清状态”（`prepare`）、“按条校验并保存需求，交由产品分析决策”（`merge`）、“保存本轮已校验产品动作”（`product_state`）和“完整回复后记录本业务上下文”（`record_reply`）在明确阶段更新对话状态。
+3. `save_scope`、`save_catalog`、`save_needs`、`save_decision` 和 `save_reply` 分别写回对应阶段更新的会话字段。
 4. “僅讀取本輪初篩計劃原文”（`rank`）提供候选完整原文；“校验套餐、需求覆盖及原文引用”（`validate_selection`）再检查 LLM 结论是否被原文支持。
 5. “准备流式回复上下文，不包装聊天JSON”（`reply_context`）把业务结果转换成回复输入；“自然语言回复，直接流式输出”（`reply`）负责自然语言表达。
 
@@ -152,7 +152,7 @@
 
 1. 确认输入事件及 `ingress` 的 `ok`、`event`、`active_business`。
 2. 对照 LLM 的 `structured_output` 和紧随其后的代码校验节点，判断问题是模型误判还是校验拒绝。
-3. 检查目录状态及 BN 的 `bn_scope_codes`，确认是否是地址范围或缓存导致的分流。
+3. 检查 `catalog.loaded`、目录状态和 BN 的 `bn_scope_codes`，确认是否是地址范围或缓存导致的分流。
 4. 查看 `*_needs` 和 `decision_state` 输出，确认需求是否正确合并、追问是否仍待回答。
 5. 推荐路径检查 `product_decision`、`rank` 的候选原文及 `validate_selection` 的校验错误。
 6. 最后检查 `reply_context` 输入和 `record_reply` 写回，确认回复内容及下一轮状态一致。

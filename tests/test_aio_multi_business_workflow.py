@@ -7,7 +7,9 @@ from unittest.mock import Mock, patch
 
 import yaml
 
+from dify import workflow_logic
 from dify.model_output_schemas import MODEL_SCHEMAS
+from test_structured_retry_contract import assert_dify_depth
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -231,6 +233,7 @@ class MultiBusinessWorkflowTests(unittest.TestCase):
                         item["variable"]: copy.deepcopy(get(item["value_selector"])) for item in data["variables"]
                     })
                     self.assert_output(data, result)
+                    assert_dify_depth(self, result, path=node_id, limit=4)
                     if node_id == "address_action":
                         timeline.append(("action", result))
                 elif kind == "llm":
@@ -278,6 +281,7 @@ class MultiBusinessWorkflowTests(unittest.TestCase):
                                         for item in child["variables"]
                                     })
                                     self.assert_output(child, child_result)
+                                    assert_dify_depth(self, child_result, path=child_id, limit=4)
                                 elif child["type"] == "variable-aggregator":
                                     available = [selector for selector in child["variables"]
                                                  if local_states[selector[0]] == "done"
@@ -570,7 +574,9 @@ class MultiBusinessWorkflowTests(unittest.TestCase):
                 self.assertEqual(result["bundle"]["mode"], "error")
                 self.assertEqual(json.loads(result["shortlist_json"])["selected_plan_codes"], [])
         ambiguous = copy.deepcopy(arguments)
-        ambiguous["bundle"]["instruction"] = "购买目标仍有歧义"
+        bundle = workflow_logic.unpack_bundle(ambiguous["bundle"])
+        bundle["instruction"] = "购买目标仍有歧义"
+        ambiguous["bundle"] = workflow_logic.pack_bundle(bundle)
         result = self.functions["product_decision"](llm_output=json.dumps(decision), **ambiguous)
         self.assertEqual(result["bundle"]["mode"], "error")
 
@@ -768,6 +774,17 @@ class MultiBusinessWorkflowTests(unittest.TestCase):
         finally:
             self.graph = original
 
+    def test_missing_structured_output_retries_without_aborting_the_turn(self):
+        routing = self.route("MS")
+        saved, _, stage = self.turn(
+            "想睇流動通訊計劃", routing=routing,
+            model_responses={"business": [{"llm_result": {"structured_output": None}}, json.dumps(routing)]},
+        )
+        self.assertEqual(stage["executed"].count("business"), 2)
+        self.assertEqual(stage["loop_contexts"]["business_retry_loop"][1]["last_error"],
+                         "结构化输出必须为JSON对象")
+        self.assertEqual(saved["current_business"], "MS")
+
     def test_reported_malformed_routing_retries_or_reaches_technical_error(self):
         message = "睇睇你地流通通讯有冇优惠？"
         malformed = '{"business": "MS" , "  ？"  :  " " , "    ？"  :  []  "   '
@@ -786,7 +803,7 @@ class MultiBusinessWorkflowTests(unittest.TestCase):
                 self.assertIn("模型返回无效 JSON", context["last_error"])
                 self.assertNotIn("模型输出为空", context["last_error"])
                 if expected_mode == "error":
-                    self.assertNotIn("fetch_tags", stage["executed"])
+                    self.assertFalse(stage["outputs"].get("catalog", {}).get("loaded", False))
                     self.assertEqual(stage["outputs"]["reply_context"]["selected_plans_json"], "[]")
                     self.assertEqual(stage["outputs"]["prepare"]["snapshot"]["routing_context"]["messages"], [message])
 
@@ -844,25 +861,25 @@ class MultiBusinessWorkflowTests(unittest.TestCase):
             {**valid, "attitude": "interested"},
         ):
             with self.subTest(change=change):
-                result = self.functions["merge"](json.dumps({"changes": [], "question_changes": [change]}),
+                result = workflow_logic.merge(json.dumps({"changes": [], "question_changes": [change]}),
                                                  snapshot, "MS")["bundle"]
                 self.assertEqual(result["mode"], "error")
                 self.assertEqual(result["snapshot"]["ms_needs"]["questions"], [])
                 self.assertEqual(result["snapshot"]["bn_needs"]["questions"], [])
-        added = self.functions["merge"](json.dumps({"changes": [], "question_changes": [valid]}),
+        added = workflow_logic.merge(json.dumps({"changes": [], "question_changes": [valid]}),
                                         snapshot, "MS")["bundle"]["snapshot"]
         self.assertEqual(added["ms_needs"]["questions"][0]["id"], "Q1")
         added["ms_needs"]["pending_messages"] = ["有没有旅游数据？"]
         update = {**valid, "operation": "update", "question_id": "Q1", "text": "旅游数据的收费条件"}
-        invalid = self.functions["merge"](json.dumps({"changes": [], "question_changes": [update, update]}),
+        invalid = workflow_logic.merge(json.dumps({"changes": [], "question_changes": [update, update]}),
                                           added, "MS")["bundle"]
         self.assertEqual(invalid["mode"], "error")
         self.assertEqual(invalid["snapshot"]["ms_needs"]["questions"], added["ms_needs"]["questions"])
-        updated = self.functions["merge"](json.dumps({"changes": [], "question_changes": [update]}),
+        updated = workflow_logic.merge(json.dumps({"changes": [], "question_changes": [update]}),
                                           added, "MS")["bundle"]["snapshot"]
         self.assertEqual(updated["ms_needs"]["questions"][0]["text"], update["text"])
         updated["ms_needs"]["pending_messages"] = ["有没有旅游数据？"]
-        removed = self.functions["merge"](json.dumps({"changes": [], "question_changes": [
+        removed = workflow_logic.merge(json.dumps({"changes": [], "question_changes": [
             {**update, "operation": "remove"}]}), updated, "MS")["bundle"]["snapshot"]["ms_needs"]
         self.assertEqual(removed["questions"], [])
         self.assertEqual(removed["next_question_id"], 2)
@@ -951,7 +968,7 @@ class MultiBusinessWorkflowTests(unittest.TestCase):
                 prefix = business.lower()
                 snapshot[prefix + "_plans_tags"] = copy.deepcopy(self.sources[business][:1])
                 bundle = {"snapshot": snapshot, "business": business, "mode": "analyze", "instruction": ""}
-                result = self.functions["decision_state"](bundle)
+                result = workflow_logic.decision_state(bundle)
                 self.assertEqual(json.loads(result["comparison_context_json"]), {
                     "latest_user_message": "", "previous_recommendations": [], "unavailable_previous_codes": [],
                 })
@@ -959,7 +976,7 @@ class MultiBusinessWorkflowTests(unittest.TestCase):
                 needs["last_recommended_codes"] = [self.sources[business][0]["plan_code"], "MISSING"]
                 needs["answer_history"] = [{"topic": "refinement", "question": "", "answer": "想换一个"}]
                 before = copy.deepcopy(snapshot)
-                result = self.functions["decision_state"](bundle)
+                result = workflow_logic.decision_state(bundle)
                 self.assert_output(self.nodes["decision_state"], result)
                 comparison = json.loads(result["comparison_context_json"])
                 self.assertEqual(comparison["latest_user_message"], "想换一个")
@@ -976,7 +993,7 @@ class MultiBusinessWorkflowTests(unittest.TestCase):
         self.assertEqual(stage["timeline"][0], ("action", {"action": "request_address"}))
         self.assertEqual("".join(value for event, value in stage["timeline"] if event == "text_chunk"), answer)
         self.assertIn("填写地址表单", answer)
-        self.assertNotIn("fetch_tags", stage["executed"])
+        self.assertFalse(stage["outputs"].get("catalog", {}).get("loaded", False))
         self.assertNotIn("extract", stage["executed"])
         self.assertEqual(saved["bn_needs"]["pending_messages"], ["想办1000M宽带"])
         self.assertFalse(saved["bn_needs"]["interview_pending"])
@@ -1004,7 +1021,7 @@ class MultiBusinessWorkflowTests(unittest.TestCase):
             self.assertEqual(saved["bn_plans_tags"], self.sources["BN"][3:5])
             self.assertEqual(stage["outputs"]["ingress"]["snapshot"]["bn_plans_tags"], [])
             self.assertEqual(stage["outputs"]["ingress"]["message"], "")
-            self.assertIn("fetch_tags", stage["executed"])
+            self.assertTrue(stage["outputs"]["catalog"]["loaded"])
             self.assertNotIn("business", stage["executed"])
 
     def test_invalid_new_address_invalidates_old_scope_before_error(self):
@@ -1243,10 +1260,10 @@ class MultiBusinessWorkflowTests(unittest.TestCase):
         self.assertNotIn("address_action", stage["executed"])
         variables, _, stage = self.turn("继续", variables=variables)
         self.assertEqual(stage["mode"], "no_plans")
-        self.assertNotIn("fetch_tags", stage["executed"])
+        self.assertFalse(stage["outputs"].get("catalog", {}).get("loaded", False))
 
     def test_tag_service_invalid_results_and_failure_never_widen_scope(self):
-        namespace = self.functions["fetch_tags"].__globals__
+        namespace = self.functions["catalog"].__globals__
         for returned in (self.sources["BN"][:1], self.sources["BN"][:4]):
             with patch.dict(namespace, {"mock_fetch_tags": lambda *args: returned}):
                 saved, _, stage = self.address()
@@ -1257,13 +1274,13 @@ class MultiBusinessWorkflowTests(unittest.TestCase):
         with patch.dict(namespace, {"mock_fetch_tags": Mock(side_effect=ValueError("标签服务失败"))}):
             saved, _, _ = self.address()
         saved, _, stage = self.turn("重试", variables=saved)
-        self.assertIn("fetch_tags", stage["executed"])
+        self.assertTrue(stage["outputs"]["catalog"]["loaded"])
         self.assertEqual(saved["bn_catalog_status"], "ready")
         _, _, stage = self.address(["UNKNOWN_PLAN"])
         self.assertEqual(stage["mode"], "error")
 
     def test_real_mock_call_counts_across_turns(self):
-        tags_namespace = self.functions["fetch_tags"].__globals__
+        tags_namespace = self.functions["catalog"].__globals__
         rank_namespace = self.functions["rank"].__globals__
         tags = Mock(wraps=tags_namespace["mock_fetch_tags"])
         rank = Mock(wraps=rank_namespace["mock_rank_and_details"])
@@ -1387,7 +1404,7 @@ class MultiBusinessWorkflowTests(unittest.TestCase):
         self.assertEqual(saved["ms_needs"], ms_needs)
         self.assertNotIn("本地100GB流量", stage["outputs"]["catalog"]["needs_json"])
         saved, _, stage = self.turn("再看手机", variables=saved, routing=self.route("MS"))
-        self.assertNotIn("fetch_tags", stage["executed"])
+        self.assertFalse(stage["outputs"].get("catalog", {}).get("loaded", False))
         self.assertEqual(self.preference_texts(saved, "MS"), ["本地100GB流量"])
         self.assertEqual(saved["ms_plans_tags"], self.sources["MS"])
         self.assertEqual(saved["xe_plans_tags"], self.sources["XE"])
@@ -1401,7 +1418,7 @@ class MultiBusinessWorkflowTests(unittest.TestCase):
             )
             self.assertEqual(stage["mode"], "recommend")
             self.assertEqual(saved["bn_scope_codes"], [])
-        namespace = self.functions["fetch_tags"].__globals__
+        namespace = self.functions["catalog"].__globals__
         service = Mock(return_value=[])
         with patch.dict(namespace, {"mock_fetch_tags": service}):
             saved, _, _ = self.turn("手机套餐", routing=self.route("MS"))
@@ -1412,7 +1429,7 @@ class MultiBusinessWorkflowTests(unittest.TestCase):
     def test_general_consultation_skips_products_and_form(self):
         saved, _, stage = self.turn("Wi-Fi和宽带有什么区别？", routing=self.route(intent="consult"))
         self.assertEqual(stage["mode"], "consult")
-        self.assertNotIn("fetch_tags", stage["executed"])
+        self.assertFalse(stage["outputs"].get("catalog", {}).get("loaded", False))
         self.assertNotIn("address_action", stage["executed"])
         self.assertEqual(saved["bn_needs"]["pending_messages"], [])
 
@@ -1503,6 +1520,25 @@ class MultiBusinessWorkflowTests(unittest.TestCase):
         saved, _, _ = self.turn(text, routing=self.route("MS", ["MS", "BN"], requests=requests))
         self.assertEqual(saved["bn_needs"]["pending_messages"], ["宽带要100M"])
 
+    def test_saved_selection_survives_early_business_clarification(self):
+        saved = copy.deepcopy(self.initial)
+        saved["current_business"] = "MS"
+        requirement = {"id": "T1", "text": "月費最多$150", "evidence": ["月費最多$150"],
+                       "attitude": "interested", "priority": "required"}
+        saved["ms_needs"]["active_selection"] = {
+            "shown_plan_codes": ["P1"], "turn_intent": "availability",
+            "availability_scope": "current_purchase", "temporarily_excluded_ids": [],
+            "turn_requirements": [requirement],
+        }
+        saved, answer, stage = self.turn(
+            "想要Netflix", variables=saved, routing=self.route("", clarification="單獨訂閱定連寬頻？"),
+        )
+        self.assertEqual(stage["mode"], "clarify")
+        self.assertNotIn("catalog", stage["executed"])
+        self.assertEqual(saved["routing_context"]["question"], answer)
+        self.assertEqual(saved["ms_needs"]["selection_turn_requirements"], [requirement])
+        self.assertEqual(saved["ms_needs"]["active_selection"]["shown_plan_codes"], ["P1"])
+
     def test_invalid_input_and_corrupt_state_surface_error_without_reset(self):
         for kwargs in ({"text": ""}, {"event_type": "unknown"}, {"bn_plan_codes": "PLAN_A"}):
             _, answer, stage = self.turn(**kwargs)
@@ -1591,12 +1627,13 @@ class MultiBusinessWorkflowTests(unittest.TestCase):
                         self.assertEqual(result["recommendations_json"], "[]")
                     else:
                         self.assertEqual(result["bundle"]["mode"], "error")
-                        self.assertTrue(result["bundle"]["instruction"])
+                        bundle = workflow_logic.unpack_bundle(result["bundle"])
+                        self.assertTrue(bundle["instruction"])
                         if node_id == "merge":
-                            self.assertEqual(result["bundle"]["snapshot"]["bn_needs"]["pending_messages"],
+                            self.assertEqual(bundle["snapshot"]["bn_needs"]["pending_messages"],
                                              before["snapshot"]["bn_needs"]["pending_messages"])
                             if invalid in ("", " \n", "```json\n\n```"):
-                                self.assertIn("模型输出为空", result["bundle"]["instruction"])
+                                self.assertIn("模型输出为空", bundle["instruction"])
                     self.assertEqual(arguments, before)
 
     def test_error_reply_cannot_read_previous_product_reply(self):
@@ -1695,7 +1732,7 @@ class MultiBusinessWorkflowTests(unittest.TestCase):
         self.assertNotIn("{{#decision.output.instruction#}}", prompt)
         for instruction in ("", "需要确认本轮比较对象"):
             with self.subTest(instruction=instruction):
-                result = self.functions["decision_state"]({
+                result = workflow_logic.decision_state({
                     "snapshot": copy.deepcopy(self.initial), "business": "BN",
                     "mode": "analyze", "instruction": instruction,
                 })
@@ -1795,10 +1832,16 @@ class MultiBusinessWorkflowTests(unittest.TestCase):
                     outputs = {item["label"]: None for item in self.nodes[producer]["loop_variables"]}
                 elif self.nodes[producer]["type"] == "llm":
                     outputs = {"text": None, "structured_output": None, "error_type": None, "error_message": None}
+                elif self.nodes[producer]["type"] == "variable-aggregator":
+                    inputs = self.nodes[producer]["variables"]
+                    definitions = [self.nodes[source].get("outputs", {}).get(output) for source, output in inputs]
+                    children = [spec["children"] for spec in definitions if spec is not None and spec.get("children")]
+                    if children:
+                        self.assertEqual(len(children), len(inputs), producer)
+                        self.assertTrue(all(item == children[0] for item in children), producer)
+                    outputs = {"output": {"children": children[0]} if children else None}
                 else:
-                    outputs = self.nodes[producer].get("outputs", {
-                        "output" if self.nodes[producer]["type"] == "variable-aggregator" else "text": None
-                    })
+                    outputs = self.nodes[producer].get("outputs", {"text": None})
                 self.assertIn(field, outputs)
                 if len(selector) > 2:
                     specification = outputs[field]
@@ -1808,12 +1851,18 @@ class MultiBusinessWorkflowTests(unittest.TestCase):
                         self.assertIsInstance(children, dict, (node_id, selector))
                         self.assertIn(child, children, (node_id, selector))
                         specification = children[child]
-        for node_id, data in self.nodes.items():
-            if data["type"] == "assigner":
-                if parent_ids[node_id]:
-                    self.assertTrue(all(item["variable_selector"][0] == parent_ids[node_id] for item in data["items"]))
-                else:
-                    self.assertEqual({item["variable_selector"][1] for item in data["items"]}, set(self.initial))
+        needs = {name for name in self.initial if name.endswith("_needs")}
+        catalog = {name for name in self.initial if name.endswith(("_plans_tags", "_catalog_status"))}
+        assignments = {
+            "save_ingress": set(self.initial),
+            "save_scope": needs | {"current_business", "routing_context"},
+            "save_catalog": needs | catalog,
+            "save_needs": needs,
+            "save_decision": needs,
+            "save_reply": needs | {"routing_context"},
+        }
+        for node_id, expected in assignments.items():
+            self.assertEqual({item["variable_selector"][1] for item in self.nodes[node_id]["items"]}, expected)
 
 if __name__ == "__main__":
     unittest.main()

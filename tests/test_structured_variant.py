@@ -5,6 +5,7 @@ import yaml
 from jsonschema import Draft202012Validator
 
 from dify.build_structured_variant import DESTINATION, SOURCE, build
+from dify import workflow_logic
 from dify.model_output_schemas import MODEL_SCHEMAS
 
 
@@ -18,10 +19,13 @@ class StructuredVariantTests(unittest.TestCase):
     def test_importable_exports_are_identical(self):
         self.assertEqual(DESTINATION.with_suffix(".txt").read_bytes(), DESTINATION.read_bytes())
 
-    @unittest.skipUnless(SOURCE.is_file(), "缺少工作流生成源文件 AIO Multi Business.txt")
     def test_artifact_is_reproducible(self):
         original = yaml.safe_load(SOURCE.read_text(encoding="utf-8"))
         self.assertEqual(self.flow, build(original))
+        self.assertEqual(
+            {item["name"]: item["value"] for item in self.flow["workflow"]["conversation_variables"]},
+            workflow_logic.DEFAULTS,
+        )
 
     def test_schema_models_and_success_failure_paths(self):
         for node_id, schema in MODEL_SCHEMAS.items():
@@ -81,8 +85,12 @@ class StructuredVariantTests(unittest.TestCase):
                 exec(compile(data["code"], node_id, "exec"), namespace)
                 seen = []
                 result = dict(ok=True, mode="ok", text="", error="", bundle={"mode": "ok", "instruction": ""})
-                namespace["validate"] = lambda *args: seen.append(args) or result
-                args = [sample if v["variable"] == "llm_output" else {} for v in data["variables"]]
+                handler = {"business": "prepare", "extract": "merge",
+                           "shortlist": "product_decision", "select": "validate_selection"}[node_id]
+                namespace[handler] = lambda *args: seen.append(args) or result
+                values = {"llm_output": sample,
+                          "bundle": workflow_logic.pack_bundle({"snapshot": workflow_logic.DEFAULTS, "mode": "ok"})}
+                args = [values.get(v["variable"], {}) for v in data["variables"]]
                 actual = namespace["main"](**dict(zip((v["variable"] for v in data["variables"]), args)))
                 self.assertEqual(json.loads(actual["text"]), sample)
                 self.assertIn(actual["text"], seen[0])

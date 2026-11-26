@@ -70,7 +70,7 @@ class LatestPlanDataTests(unittest.TestCase):
                             self.assertIn(plain_text(tag), document)
 
     def test_workflow_embeds_exact_latest_catalogs_and_documents(self):
-        self.assertEqual(self.literal("fetch_tags", "TAG_CATALOGS"), self.catalogs)
+        self.assertEqual(self.literal("catalog", "TAG_CATALOGS"), self.catalogs)
         expected = {
             business: {plan["plan_code"]: self.documents[plan["plan_code"]] for plan in plans}
             for business, plans in self.catalogs.items()
@@ -81,7 +81,7 @@ class LatestPlanDataTests(unittest.TestCase):
     def test_old_only_codes_are_absent_from_mock_apis(self):
         retired = {"AX9824OFF", "MC5G30G3BAE", "MC5G100G3BAC", "MTOC30G98", "MTOC5G50GJX",
                    "AX12924DPIQOEX", "AX19924GS5OTT", "AX109243MNEWCDN", "AX9924AXA"} - self.documents.keys()
-        for business, plans in self.literal("fetch_tags", "TAG_CATALOGS").items():
+        for business, plans in self.literal("catalog", "TAG_CATALOGS").items():
             self.assertFalse(retired & {plan["plan_code"] for plan in plans})
             self.assertFalse(retired & self.literal("rank", "DETAILS")[business].keys())
         self.assertIn("AX10924DB_MTSE20G98NO", self.literal("rank", "DETAILS")["BN"])
@@ -95,22 +95,22 @@ class LatestPlanDataTests(unittest.TestCase):
 
     def test_mock_api_execution_returns_only_current_tags_and_exact_details(self):
         tags_api = {}
-        exec(compile(self.nodes["fetch_tags"]["code"], "fetch_tags", "exec"), tags_api)
+        exec(compile(self.nodes["catalog"]["code"], "catalog", "exec"), tags_api)
         details_api = {}
         exec(compile(self.nodes["rank"]["code"], "rank", "exec"), details_api)
         for business, plans in self.catalogs.items():
             codes = [plan["plan_code"] for plan in plans]
             with self.subTest(business=business):
-                result = tags_api["main"](business, {"bn_scope_codes": codes})
-                self.assertEqual(result["bundle"]["status"], "ready")
-                self.assertEqual(result["bundle"]["plans_tags"], plans)
+                result = tags_api["fetch_tags"](business, {"bn_scope_codes": codes})
+                self.assertEqual(result["status"], "ready")
+                self.assertEqual(result["plans_tags"], plans)
                 returned = details_api["mock_rank_and_details"](business, plans, codes[::-1])
                 self.assertEqual([plan["plan_code"] for plan in returned], codes[::-1])
                 for plan in returned:
                     self.assertEqual(plan["markdown"], self.documents[plan["plan_code"]])
         missing_code = "NOT_IN_CURRENT_SOURCE"
         self.assertNotIn(missing_code, self.documents)
-        rejected = tags_api["main"]("BN", {"bn_scope_codes": [missing_code]})["bundle"]
+        rejected = tags_api["fetch_tags"]("BN", {"bn_scope_codes": [missing_code]})
         self.assertEqual(rejected["status"], "error")
         self.assertEqual(rejected["plans_tags"], [])
         self.assertTrue(rejected["error"])

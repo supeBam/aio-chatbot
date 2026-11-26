@@ -1,231 +1,137 @@
-"""Generate a structured-output variant without modifying the original chatflow."""
+"""从工作流画布、Python 规则和套餐资料生成 Dify 导入文件。"""
 
+import argparse
+import ast
 import copy
-import json
 from pathlib import Path
 
 import yaml
 
 if __package__:
-    from .customer_turn_policy import apply_customer_turn_policy
     from .model_output_schemas import MODEL_SCHEMAS, RECOMMENDATION_LIMIT
-    from .product_link_policy import apply_product_link_policy
-    from .purchase_continuation import apply_purchase_continuation
-    from .recommendation_delivery import apply_recommendation_delivery
+    from .plan_catalog import load_catalogs
 else:
-    from customer_turn_policy import apply_customer_turn_policy
     from model_output_schemas import MODEL_SCHEMAS, RECOMMENDATION_LIMIT
-    from product_link_policy import apply_product_link_policy
-    from purchase_continuation import apply_purchase_continuation
-    from recommendation_delivery import apply_recommendation_delivery
+    from plan_catalog import load_catalogs
 
 
 DIRECTORY = Path(__file__).resolve().parent
-SOURCE = DIRECTORY / "AIO Multi Business.txt"
+SOURCE = DIRECTORY / "workflow_graph.yml"
+LOGIC = DIRECTORY / "workflow_logic.py"
 DESTINATION = DIRECTORY / "AIO Multi Business Structured.yml"
+FORWARD_NODES = {"basic_reply", "skip_analysis"}
 
 
-def configure_customer_replies(flow, nodes):
-    flow["workflow"]["features"]["opening_statement"] = (
-        "你好！想了解家居寬頻、流動通訊或者影音串流計劃？我可以幫你比較。"
-    )
-    for node_id in ("select", "select_retry_loop"):
-        node = nodes[node_id]["data"]
-        node["title"] = node["title"].replace("最多三款", f"最多{RECOMMENDATION_LIMIT}款")
-    select_prompt = nodes["select"]["data"]["prompt_template"][0]
-    select_prompt["text"] = select_prompt["text"].replace("最多3款", f"最多{RECOMMENDATION_LIMIT}款")
-    for node_id in ("select_validation", "validate_selection"):
-        node = nodes[node_id]["data"]
-        node["code"] = node["code"].replace("len(selected) > 3", f"len(selected) > {RECOMMENDATION_LIMIT}").replace(
-            "最多三个唯一编号", f"最多{RECOMMENDATION_LIMIT}个唯一编号"
-        )
+class WorkflowDumper(yaml.SafeDumper):
+    def ignore_aliases(self, data):
+        return True
 
-    context = nodes["reply_context"]["data"]
-    context["code"] = context["code"].replace(
-        '            "\\n- **取舍提醒**：关键限制、未知条件和偏好缺口。"\n', ""
-    ).replace("**核心内容**", "**計劃內容**").replace("**月费与合约**", "**月費及合約**").replace(
-        "**相关特色**", "**附加服務**"
-    ).replace("最后简短对比", "有兩款時可簡短比較")
 
-    prompt = nodes["reply"]["data"]["prompt_template"][0]
-    replacements = {
-        "用简体中文自然简洁地回复。": (
-            "所有面向客戶的回覆一律用香港繁體中文，語氣自然、簡潔，像香港電訊客服。"
-            "使用家居寬頻、流動通訊、流動電話（智能裝置稱智能電話）、本地數據、漫遊數據、"
-            "上台月費計劃、合約期、安裝費、回贈及串流服務等香港用語。"
-            "即使用戶、歷史或資料使用簡體字或其他地區用語，也用香港用語轉述，"
-            "例如把「手機／手机」寫成「流動電話」或「智能電話」。"
-            "中性計劃名稱可轉為香港繁體，保留計劃編號、品牌專名、數字與單位。"
-            "回覆以本輪答覆收結，省略測試或演示聲明。"
-        ),
-        "我可以根据套餐资料帮您比较流量、月费和合约": "我可以按計劃資料幫你比較數據用量、月費同合約期",
-        "本轮已校验精选的最多三款套餐": f"本輪已核實的最多{RECOMMENDATION_LIMIT}款計劃",
-        "priority=preferred的缺口作为取舍": "如客戶問到未涵蓋的偏好，直接交代有關資料",
-        "说明相对上一轮对应规格的变化及费用、合约取舍": "簡述與上一輪相比的規格、月費及合約期變化",
-        "推荐必须说明仅为模拟演示，不代表真实报价或可办理承诺。": "",
-        "优先解释核心速度/流量/服务及费用取舍": "優先交代網速、數據用量、服務及月費",
-        "完整展示本轮精选和模拟演示声明": "列出本輪核實的計劃",
-        "这次的方案名义带宽从上一轮的1000M提高到2000M；以下同时列出月费和合约取舍，实际体验仍受环境等因素影响。": (
-            "今次計劃嘅標示網速由上次嘅1000M提升到2000M，實際速度會受使用環境影響。"
-        ),
-        "这次精选仍是1000M，没有比上一轮提升带宽，不能满足您希望更快的调整。以下仅作未改善备选，并非更高速推荐。": (
-            "今次睇到嘅計劃仍然係1000M，網速同上次一樣，未能滿足你想再快啲嘅要求。"
-        ),
-        "这款资料列明2000M，但目前无法确认您所比较方案的带宽，因此还不能说它比之前更快。": (
-            "呢款計劃列明係2000M，但暫時未確認你想比較嗰款嘅網速。"
-        ),
-        "“**核心内容**”“**月费与合约**”“**相关特色**”“**取舍提醒**”": (
-            "“**計劃內容**”“**月費及合約**”“**附加服務**”。必要收費、合約條件或與本輪需求直接相關的限制，"
-            "寫入相應項目或直接回答客戶"
-        ),
-        "最后仅作简短比较": "有兩款時可簡短比較，比較完即可結束",
-    }
-    for old, new in replacements.items():
-        prompt["text"] = prompt["text"].replace(old, new)
+def represent_text(dumper, value):
+    style = "|" if "\n" in value else None
+    return dumper.represent_scalar("tag:yaml.org,2002:str", value, style=style)
+
+
+WorkflowDumper.add_representer(str, represent_text)
+
+
+def node_sources(source):
+    """按源码顺序收集函数和常量，供独立的 Dify 沙箱使用。"""
+    definitions = {}
+    for statement in ast.parse(source).body:
+        if isinstance(statement, ast.FunctionDef):
+            names = [statement.name]
+        elif isinstance(statement, ast.Assign) and len(statement.targets) == 1 and isinstance(statement.targets[0], ast.Name):
+            names = [statement.targets[0].id]
+        elif isinstance(statement, ast.Import) or isinstance(statement, ast.ImportFrom) and statement.level == 0:
+            names = [item.asname or item.name.split(".")[0] for item in statement.names]
+        else:
+            continue
+        code = ast.get_source_segment(source, statement)
+        definitions.update(dict.fromkeys(names, code))
+    return definitions
+
+
+def render_code(definitions, node):
+    node_id, data = node["id"], node["data"]
+    entry = node_id
+    if node_id in FORWARD_NODES:
+        entry = "forward_bundle"
+    elif node_id.endswith("_node_failure"):
+        entry = "model_failure"
+
+    adapt_bundle = node_id not in FORWARD_NODES
+    reads_bundle = adapt_bundle and any(v["variable"] == "bundle" for v in data["variables"])
+    writes_bundle = adapt_bundle and "bundle" in data["outputs"]
+    if reads_bundle or writes_bundle:
+        # 业务函数在 Python 内使用对象。只有代码节点入口转换分支数据。
+        function = ast.parse(definitions[entry]).body[0]
+        signature = ast.unparse(function.args)
+        arguments = [arg.arg for arg in function.args.args]
+        if reads_bundle:
+            arguments[arguments.index("bundle")] = "unpack_bundle(bundle)"
+        wrapper = f"def main({signature}):\n    result = {entry}({', '.join(arguments)})"
+        if writes_bundle:
+            wrapper += '\n    result["bundle"] = pack_bundle(result["bundle"])'
+        wrapper += "\n    return result"
+    else:
+        wrapper = f"main = {entry}"
+
+    needed = set()
+
+    def collect(code):
+        for name in {token.id for token in ast.walk(ast.parse(code)) if isinstance(token, ast.Name)}:
+            if name in definitions and name not in needed:
+                needed.add(name)
+                collect(definitions[name])
+
+    collect(wrapper)
+    parts = dict.fromkeys(code for name, code in definitions.items() if name in needed)
+    return "\n\n\n".join([*parts, wrapper]) + "\n"
 
 
 def build(flow):
     flow = copy.deepcopy(flow)
-    flow["app"]["name"] += " - JSON结构化输出"
-    graph = flow["workflow"]["graph"]
-    nodes = {node["id"]: node for node in graph["nodes"]}
-
-    for model_id, schema in MODEL_SCHEMAS.items():
-        llm = nodes[model_id]
-        data = llm["data"]
-        data["model"]["completion_params"]["response_format"] = "json_object"
-        data["structured_output_enabled"] = True
-        data["structured_output"] = {"schema": copy.deepcopy(schema)}
-        data["error_strategy"] = "fail-branch"
-        loop = nodes[model_id + "_retry_loop"]["data"]
-        loop["loop_count"] = 3
-        loop["title"] = loop["title"].replace("最多重试1次", "最多重试2次")
-        system_prompt = data["prompt_template"][0]
-        system_prompt["text"] = system_prompt["text"].replace(
-            "校验反馈重生成（最多1次）", "校验反馈重生成（最多2次）"
-        )
-
-        # A few original examples omit a field required by the existing schema.
-        if model_id == "select":
-            prompt = data["prompt_template"][0]
-            lines = prompt["text"].splitlines()
-            for index, line in enumerate(lines):
-                if not line.strip().startswith("{") or "|" in line:
-                    continue
-                try:
-                    example = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                example.pop("selected_plan_codes", None)
-                for assessment in example.get("assessments", []):
-                    assessment.setdefault("info_answers", [])
-                lines[index] = json.dumps(example, ensure_ascii=False)
-            prompt["text"] = "\n".join(lines)
-            prompt["text"] += (
-                "\n\nassessments按推荐顺序排列，每款只出现一次；plan_code必须逐字复制当前候选编号，"
-                "不拼接、改写或添加后缀。代码将按此顺序提取精选编号，不额外输出编号列表。"
-            )
-            for validator_id in ("select_validation", "validate_selection"):
-                validator = nodes[validator_id]["data"]
-                validator["code"] = validator["code"].replace(
-                    '{"selected_plan_codes", "assessments", "reason"}',
-                    '{"assessments", "reason"}',
-                ).replace(
-                    'selected = output["selected_plan_codes"]',
-                    'if not isinstance(output["assessments"], list) or any('
-                    'not isinstance(item, dict) or not isinstance(item.get("plan_code"), str) '
-                    'for item in output["assessments"]):\n'
-                    '            raise ValueError("套餐核对列表或编号无效")\n'
-                    '        selected = [item["plan_code"] for item in output["assessments"]]',
-                ).replace(
-                    "精选结果必须包含编号、逐需求核对和依据", "精选结果必须包含逐需求核对和依据"
-                )
-
-        validation = nodes[model_id + "_validation"]["data"]
-        llm_input = next(item for item in validation["variables"] if item["variable"] == "llm_output")
-        llm_input["value_selector"] = [model_id, "structured_output"]
-        llm_input["value_type"] = "object"
-        marker = "validate = main\n\ndef main("
-        if validation["code"].count(marker) != 1:
-            raise ValueError(f"Unexpected validation wrapper: {model_id}")
-        before, after = validation["code"].split(marker)
-        signature, body = after.split(":\n", 1)
-        validation["code"] = (
-            before + marker + signature + ":\n"
-            + '    if not isinstance(llm_output, dict):\n'
-            + '        raise ValueError("结构化输出必须为JSON对象")\n'
-            + "    llm_output = json.dumps(llm_output, ensure_ascii=False)\n"
-            + body
-        )
-        update = nodes[model_id + "_retry_update"]["data"]
-        next(item for item in update["items"] if item["variable_selector"][1] == "current_text")["value"] = [
-            model_id + "_validation", "text"
-        ]
-
-        failure_id = model_id + "_node_failure"
-        failure_update_id = model_id + "_failure_update"
-        loop_id = model_id + "_retry_loop"
-        failure = copy.deepcopy(nodes[model_id + "_validation"])
-        failure["id"] = failure_id
-        failure["position"] = {"x": 506, "y": 220}
-        failure["positionAbsolute"] = {
-            "x": nodes[loop_id]["positionAbsolute"]["x"] + 506,
-            "y": nodes[loop_id]["positionAbsolute"]["y"] + 220,
-        }
-        failure["data"].update({
-            "title": "记录模型节点失败并重试",
-            "code": (
-                "def main(error_type, error_message):\n"
-                '    return {"retry": True, "error": "模型节点失败（" + str(error_type) + "）："'
-                ' + str(error_message), "text": ""}\n'
-            ),
-            "variables": [
-                {"value_selector": [model_id, "error_type"], "value_type": "string", "variable": "error_type"},
-                {"value_selector": [model_id, "error_message"], "value_type": "string", "variable": "error_message"},
-            ],
-        })
-        failure_update = copy.deepcopy(nodes[model_id + "_retry_update"])
-        failure_update["id"] = failure_update_id
-        failure_update["position"] = {"x": 828, "y": 220}
-        failure_update["positionAbsolute"] = {
-            "x": nodes[loop_id]["positionAbsolute"]["x"] + 828,
-            "y": nodes[loop_id]["positionAbsolute"]["y"] + 220,
-        }
-        failure_update["data"]["title"] = "更新模型失败重试状态"
-        for item in failure_update["data"]["items"]:
-            field = item["variable_selector"][1]
-            item["value"] = [failure_id, {"current_text": "text", "last_error": "error", "retry": "retry"}[field]]
-        graph["nodes"].extend([failure, failure_update])
-
-        def edge(source, handle, target, source_type, target_type):
-            return {
-                "data": {"isInIteration": False, "isInLoop": True, "loop_id": loop_id,
-                         "sourceType": source_type, "targetType": target_type},
-                "id": f"{source}-{handle}-{target}-target", "source": source,
-                "sourceHandle": handle, "target": target, "targetHandle": "target",
-                "type": "custom", "zIndex": 1001,
-            }
-
-        graph["edges"].extend([
-            edge(model_id, "fail-branch", failure_id, "llm", "code"),
-            edge(failure_id, "source", failure_update_id, "code", "assigner"),
-        ])
-
-    configure_customer_replies(flow, nodes)
-    apply_customer_turn_policy(nodes)
-    apply_product_link_policy(graph)
-    apply_recommendation_delivery(graph)
-    apply_purchase_continuation(graph)
+    catalogs, details = load_catalogs()
+    workflow = flow["workflow"]
+    bundle_fields = {
+        item["name"]: {"type": item["value_type"], "children": None}
+        for item in workflow["conversation_variables"]
+    }
+    bundle_fields.update({
+        "mode": {"type": "string", "children": None},
+        "context_json": {"type": "string", "children": None},
+    })
+    definitions = {
+        "TAG_CATALOGS": f"TAG_CATALOGS = {catalogs!r}",
+        "DETAILS": f"DETAILS = {details!r}",
+        "RECOMMENDATION_LIMIT": f"RECOMMENDATION_LIMIT = {RECOMMENDATION_LIMIT}",
+        **node_sources(LOGIC.read_text(encoding="utf-8")),
+    }
+    for node in workflow["graph"]["nodes"]:
+        data = node["data"]
+        if data["type"] == "code":
+            data["code"] = render_code(definitions, node)
+            if "bundle" in data["outputs"]:
+                data["outputs"]["bundle"]["children"] = copy.deepcopy(bundle_fields)
+        elif node["id"] in MODEL_SCHEMAS:
+            data["structured_output"] = {"schema": copy.deepcopy(MODEL_SCHEMAS[node["id"]])}
     return flow
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--check", action="store_true", help="检查提交的导出文件与源码是否一致")
+    args = parser.parse_args()
     flow = yaml.safe_load(SOURCE.read_text(encoding="utf-8"))
-    result = build(flow)
-    export = yaml.safe_dump(result, allow_unicode=True, sort_keys=False, width=120)
+    export = yaml.dump(build(flow), Dumper=WorkflowDumper, allow_unicode=True, sort_keys=False, width=120)
     for path in (DESTINATION, DESTINATION.with_suffix(".txt")):
-        path.write_text(export, encoding="utf-8")
-        print(path)
+        if args.check:
+            if not path.is_file() or path.read_text(encoding="utf-8") != export:
+                parser.exit(1, f"{path.name} 与源码不一致，请重新构建\n")
+        else:
+            path.write_text(export, encoding="utf-8")
+            print(path)
 
 
 if __name__ == "__main__":
